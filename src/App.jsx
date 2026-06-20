@@ -6,19 +6,6 @@ import BookingPage from './components/BookingPage';
 import OccupancySensor from './components/OccupancySensor';
 import { supabase } from './supabaseClient';
 
-const MOCK_BOOKINGS = [
-  {
-    id: 'mock-1',
-    room_id: 'gee-room-id',
-    booking_date: new Date().toISOString().split('T')[0],
-    start_time: '23:31:00',
-    end_time: '23:59:00',
-    title: 'Q3 Product Strategy Sync',
-    is_private: false,
-    users: { full_name: 'Sarah Jenkins', email: 'sarah@company.com' }
-  }
-];
-
 function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [room, setRoom] = useState(null);
@@ -301,7 +288,6 @@ function App() {
       .order('start_time', { ascending: true });
     
     if (data) setBookings(data);
-    setBookings(MOCK_BOOKINGS);
   }, [room?.id]);
 
   useEffect(() => {
