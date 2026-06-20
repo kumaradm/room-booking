@@ -11,7 +11,7 @@ const MOCK_BOOKINGS = [
     id: 'mock-1',
     room_id: 'gee-room-id',
     booking_date: new Date().toISOString().split('T')[0],
-    start_time: '02:15:00',
+    start_time: '23:31:00',
     end_time: '23:59:00',
     title: 'Q3 Product Strategy Sync',
     is_private: false,
@@ -31,6 +31,7 @@ function App() {
   // Keep a running reference clock tracking exactly how long a room has sat empty during a live booking
   const emptyMinutesRef = useRef(0);
   const lastActiveMeetingIdRef = useRef(null);
+  const lastMinuteRef = useRef(''); // Tracks minute changes to safely increment abandonment timers
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -47,6 +48,7 @@ function App() {
   };
 
   const timeToMinutes = (tStr) => {
+    if (!tStr) return 0;
     const [h, m] = tStr.split(':').map(Number);
     return h * 60 + m;
   };
@@ -205,6 +207,7 @@ function App() {
       lastActiveMeetingIdRef.current = currentTargetMeeting?.id || null;
       setHasCheckedIn(false);
       emptyMinutesRef.current = 0;
+      lastMinuteRef.current = '';
     }
   }, [currentTargetMeeting]);
 
@@ -222,36 +225,71 @@ function App() {
     setHasCheckedIn(false);
   }, []);
 
-  // Minute-by-minute occupancy scanning loop
+  // FIXED: Real-time clock checker evaluating deadlines accurately every second
   useEffect(() => {
-    const checkOccupancyInterval = setInterval(() => {
-      if (!currentTargetMeeting) {
-        emptyMinutesRef.current = 0;
-        return;
-      }
+    if (!currentTargetMeeting) {
+      emptyMinutesRef.current = 0;
+      return;
+    }
 
-      // If camera doesn't detect a person, increment the room vacancy count
+    const currentMinuteStr = timeStrings.timeStr.substring(0, 5); // e.g. "23:34"
+    const nowMins = timeToMinutes(timeStrings.timeStr);
+    const startMins = timeToMinutes(currentTargetMeeting.start_time);
+    const checkInDeadline = startMins + 10;
+
+    // 1. Check-In Expiration Rule evaluated instantly on the second change
+    if (!hasCheckedIn && nowMins > checkInDeadline) {
+      console.warn(`Check-in deadline missed for meeting ${currentTargetMeeting.id}. Cancelling reservation.`);
+      handleCancelGhostMeeting(currentTargetMeeting.id);
+      return;
+    }
+
+    // 2. While they are still inside the valid check-in window, freeze the mid-meeting countdown parameter
+    if (!hasCheckedIn && nowMins <= checkInDeadline) {
+      emptyMinutesRef.current = 0;
+      return;
+    }
+
+    // 3. Post-Check-In Abandonment Rule evaluated safely when the minute updates
+    if (lastMinuteRef.current !== currentMinuteStr) {
+      lastMinuteRef.current = currentMinuteStr;
+
       if (!isPersonDetected) {
         emptyMinutesRef.current += 1;
         if (emptyMinutesRef.current >= 5) {
           handleCancelGhostMeeting(currentTargetMeeting.id);
         }
       } else {
-        emptyMinutesRef.current = 0; // Reset countdown if camera detects presence
+        emptyMinutesRef.current = 0; 
       }
-    }, 60000);
+    }
+  }, [currentTime, isPersonDetected, currentTargetMeeting, hasCheckedIn, timeStrings.timeStr, handleCancelGhostMeeting]);
 
-    return () => clearInterval(checkOccupancyInterval);
-  }, [isPersonDetected, currentTargetMeeting, handleCancelGhostMeeting]);
-
+  // Show the check-in button if we are inside the window and haven't checked in yet
   const showCheckInButton = isWithinCheckInWindow && !hasCheckedIn;
-  const showRoomWarning = currentTargetMeeting && !isPersonDetected && emptyMinutesRef.current > 0;
+
+  // Trigger the warning if the room is empty AFTER checking in, OR if a meeting has started/is starting, no one is detected, and they haven't checked in yet!
+  const showRoomWarning = currentTargetMeeting && !isPersonDetected && (emptyMinutesRef.current > 0 || showCheckInButton);
 
   const warningLabelText = useMemo(() => {
     if (!showRoomWarning) return "";
+    
+    if (showCheckInButton) {
+      const nowMins = timeToMinutes(timeStrings.timeStr);
+      const startMins = timeToMinutes(currentTargetMeeting.start_time);
+      const windowEndMins = startMins + 10;
+      const minutesLeftToCheckIn = Math.max(0, windowEndMins - nowMins);
+
+      if (minutesLeftToCheckIn === 0) {
+        return `Please check in within less than a minute to save your booking!`;
+      }
+
+      return `Please check in within ${minutesLeftToCheckIn} ${minutesLeftToCheckIn === 1 ? 'minute' : 'minutes'} to save your booking.`;
+    }
+
     const remaining = 5 - emptyMinutesRef.current;
-    return `Warning: No presence detected. Room will auto-vacate in ${remaining} ${remaining === 1 ? 'minute' : 'minutes'}.`;
-  }, [showRoomWarning]);
+    return `Room is empty. Auto-vacating in ${remaining} ${remaining === 1 ? 'minute' : 'minutes'}.`;
+  }, [showRoomWarning, showCheckInButton, timeStrings.timeStr, currentTargetMeeting]);
 
   const fetchBookings = useCallback(async () => {
     if (!room?.id) return;
@@ -263,7 +301,7 @@ function App() {
       .order('start_time', { ascending: true });
     
     if (data) setBookings(data);
-    // setBookings(MOCK_BOOKINGS);
+    setBookings(MOCK_BOOKINGS);
   }, [room?.id]);
 
   useEffect(() => {
@@ -291,6 +329,10 @@ function App() {
     setHasCheckedIn(true);
     setShowToast(true);
 
+    setTimeout(() => {
+      setShowToast(false);
+    }, 30000);
+
     if (room?.id) {
       try {
         await supabase
@@ -302,13 +344,6 @@ function App() {
       }
     }
   };
-
-  useEffect(() => {
-    if (showToast) {
-      const timer = setTimeout(() => setShowToast(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [showToast]);
 
   const renderHeader = () => (
     <div className="flex flex-row justify-between items-center pb-4 z-10 shrink-0">
@@ -415,7 +450,7 @@ function App() {
           )}
         </div>
 
-        {/* Row 3: Contextual Footer layout cleanly segmented */}
+        {/* Row 3: Contextual Footer layout */}
         <div className="w-full pt-4 sm:pt-6 pb-2 shrink-0 overflow-visible relative">
           <div className="flex flex-row justify-between items-center w-full gap-4">
             
