@@ -4,7 +4,7 @@ import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import { supabase } from '../supabaseClient';
 
-export default function OccupancySensor({ roomId }) {
+export default function OccupancySensor({ roomId, onOccupancyChange }) {
   const webcamRef = useRef(null);
   const lastStateRef = useRef(false);
 
@@ -13,6 +13,12 @@ export default function OccupancySensor({ roomId }) {
     let model;
 
     const updateRoomStatus = async (occupied) => {
+      // 1. Bubble the status up to App.js instantly!
+      if (onOccupancyChange) {
+        onOccupancyChange(occupied);
+      }
+
+      // 2. Only write to Supabase if the state actually changes
       if (occupied !== lastStateRef.current) {
         lastStateRef.current = occupied;
         
@@ -38,9 +44,12 @@ export default function OccupancySensor({ roomId }) {
         }
       };
 
+      // Initial run
       performCheck();
 
-      intervalId = setInterval(performCheck, 300000); // in seconds (5 minutes)
+      // Check every 10 seconds for faster kiosk responsiveness 
+      // (Checking every 5 mins is too slow for a 5-min cancellation deadline)
+      intervalId = setInterval(performCheck, 10000); 
     };
 
     if (roomId) {
@@ -50,7 +59,7 @@ export default function OccupancySensor({ roomId }) {
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [roomId]);
+  }, [roomId, onOccupancyChange]);
 
   return (
     <div className="opacity-0 absolute bottom-0 right-0 w-1 h-1 overflow-hidden pointer-events-none">

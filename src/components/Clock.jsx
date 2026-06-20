@@ -10,10 +10,10 @@ export default function Clock() {
 
   return (
     <div className="text-right">
-      <div className="text-4xl font-light tracking-wide tabular-nums text-white">
+      <div className="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white truncate">
         {time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
       </div>
-      <div className="text-slate-400 text-sm font-medium mt-1 uppercase tracking-wider">
+      <div className="text-slate-200/80 sm:text-xl lg:text-3xl font-medium gap-2 mt-1">
         {time.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
       </div>
     </div>

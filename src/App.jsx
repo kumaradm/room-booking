@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Clock from './components/Clock';
 import StatusDisplay from './components/StatusDisplay';
 import SchedulePage from './components/SchedulePage';
@@ -6,51 +6,252 @@ import BookingPage from './components/BookingPage';
 import OccupancySensor from './components/OccupancySensor';
 import { supabase } from './supabaseClient';
 
+const MOCK_BOOKINGS = [
+  {
+    id: 'mock-1',
+    room_id: 'gee-room-id',
+    booking_date: new Date().toISOString().split('T')[0],
+    start_time: '02:15:00',
+    end_time: '23:59:00',
+    title: 'Q3 Product Strategy Sync',
+    is_private: false,
+    users: { full_name: 'Sarah Jenkins', email: 'sarah@company.com' }
+  }
+];
+
 function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [room, setRoom] = useState(null);
   const [bookings, setBookings] = useState([]);
   const [isPersonDetected, setIsPersonDetected] = useState(false);
+  const [hasCheckedIn, setHasCheckedIn] = useState(false); // Tracks explicit valid check-in state
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [showToast, setShowToast] = useState(false);
 
-  const releaseGhostRoom = async (bookingId) => {
-    const now = new Date();
-    const abortedEndTime = now.toTimeString().split(' ')[0]; 
+  // Keep a running reference clock tracking exactly how long a room has sat empty during a live booking
+  const emptyMinutesRef = useRef(0);
+  const lastActiveMeetingIdRef = useRef(null);
 
-    try {
-      const { error } = await supabase
-        .from('bookings')
-        .update({ end_time: abortedEndTime })
-        .eq('id', bookingId);
-
-      if (error) throw error;
-      
-      fetchBookings(); 
-    } catch (err) {
-      console.error("Failed to automatically release ghost room:", err.message);
-    }
-  };
-
-  const [, setTick] = useState(0);
   useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 60000);
+    const interval = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const fetchRoomData = async () => {
-      const { data } = await supabase
-        .from('rooms')
-        .select('*')
-        .eq('room_name', 'Gee Room')
-        .single();
+  const formatTime = (timeStr) => {
+    if (!timeStr) return "";
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours % 12 || 12;
+    const displayMinutes = minutes.toString().padStart(2, '0');
+    return `${displayHours}:${displayMinutes} ${ampm}`;
+  };
+
+  const timeToMinutes = (tStr) => {
+    const [h, m] = tStr.split(':').map(Number);
+    return h * 60 + m;
+  };
+
+  const timeStrings = useMemo(() => {
+    return {
+      timeStr: currentTime.toTimeString().split(' ')[0],
+      dateStr: currentTime.toISOString().split('T')[0]
+    };
+  }, [currentTime]);
+
+  const kioskState = useMemo(() => {
+    const nowMinutes = timeToMinutes(timeStrings.timeStr);
+
+    const active = bookings.find(b => {
+      if (b.booking_date !== timeStrings.dateStr) return false;
+      const start = timeToMinutes(b.start_time);
+      const end = timeToMinutes(b.end_time);
+      return nowMinutes >= start && nowMinutes < end;
+    });
+
+    const nextAhead = bookings.find(b => {
+      if (b.booking_date !== timeStrings.dateStr) return false;
+      return timeToMinutes(b.start_time) > nowMinutes;
+    });
+
+    if (active) {
+      const totalEndMinutes = timeToMinutes(active.end_time);
+      const diffMins = Math.max(0, totalEndMinutes - nowMinutes);
       
-      if (data) {
-        setRoom(data);
-        setIsPersonDetected(data.is_occupied);
+      const displayHrs = Math.floor(diffMins / 60).toString().padStart(2, '0');
+      const displayMins = (diffMins % 60).toString().padStart(2, '0');
+
+      return {
+        meetingToDisplay: nextAhead || null,
+        activeMeeting: active, 
+        status: {
+          text: "IN USE",
+          bgStyle: "from-[#FF3B30] to-[#5E0B08]",
+          subtext: (
+            <div className="flex flex-col gap-4 text-center items-center mt-4 bg-transparent border-0 shadow-none py-2 max-w-full px-6">
+              <h2 className="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white drop-shadow-xl max-w-4xl px-2 leading-tight break-words uppercase">
+                {active.is_private ? "Private Meeting" : active.title}
+              </h2>
+              <span className="text-lg sm:text-xl font-black tracking-widest text-red-400 uppercase block px-4 mt-2">
+                Current meeting ends in
+              </span>
+              <div className="flex flex-row items-baseline justify-center gap-4 text-white max-w-full px-4">
+                {Number(displayHrs) > 0 && (
+                  <>
+                    <div className="flex flex-col items-center">
+                      <span className="text-5xl sm:text-6xl lg:text-8xl font-medium tabular-nums tracking-tight drop-shadow-md">
+                        {displayHrs}
+                      </span>
+                      <span className="text-[11px] sm:text-xs font-bold text-white/70 tracking-wide uppercase mt-1">
+                        Hours
+                      </span>
+                    </div>
+                    <span className="text-2xl sm:text-4xl lg:text-7xl font-light text-white/40 self-center -translate-y-4">:</span>
+                  </>
+                )}
+                <div className="flex flex-col items-center">
+                  <span className="text-5xl sm:text-6xl lg:text-8xl font-black tabular-nums tracking-tight text-red-300 drop-shadow-md">
+                    {displayMins}
+                  </span>
+                  <span className="text-[11px] sm:text-xs font-bold text-white/70 tracking-wide uppercase mt-1">
+                    Minutes
+                  </span>
+                </div>
+              </div>
+            </div>
+          )
+        }
+      };
+    } 
+    
+    if (nextAhead) {
+      const minutesUntilNext = timeToMinutes(nextAhead.start_time) - nowMinutes;
+      if (minutesUntilNext <= 5 && minutesUntilNext >= 0) {
+        const [targetH, targetM] = nextAhead.start_time.split(':').map(Number);
+        const targetDate = new Date(currentTime);
+        targetDate.setHours(targetH, targetM, 0, 0);
+        
+        const diffMs = targetDate - currentTime;
+        const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+        const displayMins = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+        const displaySecs = (totalSeconds % 60).toString().padStart(2, '0');
+
+        return {
+          meetingToDisplay: nextAhead,
+          activeMeeting: null,
+          nextMeeting: nextAhead,
+          status: {
+            text: "STARTING SOON",
+            bgStyle: "from-[#FF9500] to-[#593400]",
+            subtext: (
+              <div className="flex flex-col gap-4 text-center items-center mt-4 bg-transparent border-0 shadow-none py-2 max-w-full px-6">
+                <span className="text-lg sm:text-xl font-black tracking-widest text-amber-400 uppercase block px-4 mt-1">
+                  Next meeting will start in
+                </span>
+                <div className="flex flex-row items-baseline justify-center gap-4 text-white max-w-full px-4">
+                  <div className="flex flex-col items-center">
+                    <span className="text-5xl sm:text-6xl lg:text-8xl font-medium tabular-nums tracking-tight drop-shadow-md">
+                      {displayMins}
+                    </span>
+                    <span className="text-[11px] sm:text-xs font-bold text-white/70 tracking-wide uppercase mt-1">
+                      Minutes
+                    </span>
+                  </div>
+                  <span className="text-2xl sm:text-4xl lg:text-7xl font-light text-white/40 self-center -translate-y-4 animate-pulse">:</span>
+                  <div className="flex flex-col items-center">
+                    <span className="text-5xl sm:text-6xl lg:text-8xl font-black tabular-nums tracking-tight text-amber-300 drop-shadow-md">
+                      {displaySecs}
+                    </span>
+                    <span className="text-[11px] sm:text-xs font-bold text-white/70 tracking-wide uppercase mt-1">
+                      Seconds
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )
+          }
+        };
+      }
+    }
+
+    return {
+      meetingToDisplay: nextAhead || null,
+      activeMeeting: null,
+      status: {
+        text: "AVAILABLE",
+        subtext: nextAhead ? `Until ${formatTime(nextAhead.start_time)}` : "",
+        bgStyle: "from-[#30D158] to-[#0C3E1E]"
       }
     };
-    fetchRoomData();
+  }, [bookings, timeStrings, currentTime]);
+
+  const currentStatus = kioskState.status;
+  const meetingToDisplay = kioskState.meetingToDisplay;
+  const activeMeeting = kioskState.activeMeeting;
+  const nextMeeting = kioskState.nextMeeting;
+
+  // Evaluate structural constraints (5 mins before start, up to 10 mins after start window)
+  const currentTargetMeeting = activeMeeting || nextMeeting;
+  
+  const isWithinCheckInWindow = useMemo(() => {
+    if (!currentTargetMeeting) return false;
+    const nowMins = timeToMinutes(timeStrings.timeStr);
+    const startMins = timeToMinutes(currentTargetMeeting.start_time);
+    return (nowMins >= startMins - 5) && (nowMins <= startMins + 10);
+  }, [currentTargetMeeting, timeStrings.timeStr]);
+
+  // Reset check-in state parameters across unique consecutive bookings
+  useEffect(() => {
+    if (currentTargetMeeting?.id !== lastActiveMeetingIdRef.current) {
+      lastActiveMeetingIdRef.current = currentTargetMeeting?.id || null;
+      setHasCheckedIn(false);
+      emptyMinutesRef.current = 0;
+    }
+  }, [currentTargetMeeting]);
+
+  // Sync automatic camera visibility checks
+  useEffect(() => {
+    if (isPersonDetected && isWithinCheckInWindow) {
+      setHasCheckedIn(true);
+    }
+  }, [isPersonDetected, isWithinCheckInWindow]);
+
+  const handleCancelGhostMeeting = useCallback(async (meetingId) => {
+    console.warn(`Ghost reservation detected (${meetingId}). No occupancy found. Cancelling.`);
+    await supabase.from('bookings').delete().eq('id', meetingId);
+    setBookings(prev => prev.filter(b => b.id !== meetingId));
+    setHasCheckedIn(false);
   }, []);
+
+  // Minute-by-minute occupancy scanning loop
+  useEffect(() => {
+    const checkOccupancyInterval = setInterval(() => {
+      if (!currentTargetMeeting) {
+        emptyMinutesRef.current = 0;
+        return;
+      }
+
+      // If camera doesn't detect a person, increment the room vacancy count
+      if (!isPersonDetected) {
+        emptyMinutesRef.current += 1;
+        if (emptyMinutesRef.current >= 5) {
+          handleCancelGhostMeeting(currentTargetMeeting.id);
+        }
+      } else {
+        emptyMinutesRef.current = 0; // Reset countdown if camera detects presence
+      }
+    }, 60000);
+
+    return () => clearInterval(checkOccupancyInterval);
+  }, [isPersonDetected, currentTargetMeeting, handleCancelGhostMeeting]);
+
+  const showCheckInButton = isWithinCheckInWindow && !hasCheckedIn;
+  const showRoomWarning = currentTargetMeeting && !isPersonDetected && emptyMinutesRef.current > 0;
+
+  const warningLabelText = useMemo(() => {
+    if (!showRoomWarning) return "";
+    const remaining = 5 - emptyMinutesRef.current;
+    return `Warning: No presence detected. Room will auto-vacate in ${remaining} ${remaining === 1 ? 'minute' : 'minutes'}.`;
+  }, [showRoomWarning]);
 
   const fetchBookings = useCallback(async () => {
     if (!room?.id) return;
@@ -62,143 +263,73 @@ function App() {
       .order('start_time', { ascending: true });
     
     if (data) setBookings(data);
+    // setBookings(MOCK_BOOKINGS);
   }, [room?.id]);
 
   useEffect(() => {
-    fetchBookings();
-  }, [fetchBookings]);
+    const fetchRoomData = async () => {
+      const { data } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('room_name', 'Gee Room')
+        .single();
+      
+      if (data) {
+        setRoom(data);
+      }
+    };
+    fetchRoomData();
+  }, []);
 
   useEffect(() => {
-    if (!room?.id) return;
-
-    const roomSub = supabase
-      .channel('room-status')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${room.id}` }, 
-        (payload) => setIsPersonDetected(payload.new.is_occupied)
-      ).subscribe();
-
-    const bookingSub = supabase
-      .channel('bookings-sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => fetchBookings())
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(roomSub);
-      supabase.removeChannel(bookingSub);
-    };
+    if (room?.id) {
+      fetchBookings();
+    }
   }, [room?.id, fetchBookings]);
 
+  const handleCheckIn = async () => {
+    setHasCheckedIn(true);
+    setShowToast(true);
+
+    if (room?.id) {
+      try {
+        await supabase
+          .from('rooms')
+          .update({ is_occupied: true, updated_at: new Date() })
+          .eq('id', room.id);
+      } catch (error) {
+        console.error("Failed to sync check-in status to database:", error);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (showToast) {
+      const timer = setTimeout(() => setShowToast(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [showToast]);
+
   const renderHeader = () => (
-    <div className="flex justify-between items-start h-30 border-b border-slate-900 pb-4 mb-6">
-      <div>
-        <h1 className="text-6xl font-black tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+    <div className="flex flex-row justify-between items-center pb-4 z-10 shrink-0">
+      <div className="min-w-0">
+        <h1 className="text-2xl sm:text-4xl lg:text-6xl font-black tracking-tight text-white truncate">
           {room?.room_name || "Loading..."}
         </h1>
-        <p className="text-slate-400 text-2xl flex items-center gap-2 mt-1">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-          </svg>
-          {room?.capacity || 0} People
+        <p className="text-slate-200/80 text-sm sm:text-lg lg:text-3xl font-medium flex items-center gap-2 mt-1">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-6 sm:size-8 lg:size-10 shrink-0">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+          </svg>    
+          <span className="truncate">{room?.capacity || 0} People Capacity</span>
         </p>
       </div>
-      <div className="scale-150 origin-top-right">
+      <div className="shrink-0 scale-90 sm:scale-110 lg:scale-125 origin-right">
         <Clock />
       </div>
     </div>
   );
 
-  const formatTime = (timeStr) => {
-    if (!timeStr) return "";
-    return timeStr.substring(0, 5);
-  };
-
-  const getUpcomingMeeting = () => {
-    const now = new Date();
-    const currentTimeStr = now.toTimeString().split(' ')[0];
-    const todayStr = now.toISOString().split('T')[0];
-
-    return bookings.find(b => 
-      b.booking_date === todayStr && b.start_time > currentTimeStr
-    );
-  };
-
-  const getRoomStatus = () => {
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    
-    const currentTimeStr = now.toTimeString().split(' ')[0]; 
-
-    const currentMeeting = bookings.find(b => 
-      b.booking_date === todayStr && b.start_time <= currentTimeStr && b.end_time >= currentTimeStr
-    );
-
-    const nextMeeting = bookings.find(b => 
-      b.booking_date === todayStr && b.start_time > currentTimeStr
-    );
-
-    if (currentMeeting) {
-      if (isPersonDetected) {
-        return { 
-          text: "IN USE", 
-          subtext: `Meeting: ${currentMeeting.is_private ? '🔒 Private' : currentMeeting.title}`, 
-          style: "bg-rose-500/10 text-rose-400 border-rose-500/30" 
-        };
-      }
-
-      const [startH, startM] = currentMeeting.start_time.split(':').map(Number);
-      const meetingStartTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), startH, startM, 0);
-      const minutesElapsed = Math.floor((now - meetingStartTime) / 60000);
-
-      const minutesIntoCurrentWindow = minutesElapsed % 10; 
-      const gracePeriodMinutes = 3;
-
-      if (minutesIntoCurrentWindow >= gracePeriodMinutes) {
-        releaseGhostRoom(currentMeeting.id);
-
-        return { 
-          text: "AVAILABLE", 
-          subtext: "Room automatically released due to no-show", 
-          style: "bg-slate-900/40 text-slate-400 border-slate-800" 
-        };
-      } else {
-        return { 
-          text: "IN USE", 
-          subtext: `Waiting for presence check-in (${gracePeriodMinutes - minutesIntoCurrentWindow}m remaining)`, 
-          style: "bg-indigo-500/10 text-indigo-400 border-indigo-500/30" 
-        };
-      }
-    }
-
-    if (nextMeeting) {
-      const [nextH, nextM] = nextMeeting.start_time.split(':').map(Number);
-      const nextMeetingTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), nextH, nextM, 0);
-      const minutesUntilMeeting = Math.floor((nextMeetingTime - now) / 60000);
-
-      if (minutesUntilMeeting >= 0 && minutesUntilMeeting <= 5) {
-        return { 
-          text: "STARTING SOON", 
-          subtext: `Next meeting begins in ${minutesUntilMeeting} mins`, 
-          style: "bg-cyan-500/10 text-cyan-400 border-cyan-500/30 animate-pulse" 
-        };
-      }
-    }
-
-    if (isPersonDetected) {
-      return { 
-        text: "UNBOOKED USE", 
-        subtext: nextMeeting ? `Room occupied without reservation until ${formatTime(nextMeeting.start_time)}` : "Room occupied without active reservation", 
-        style: "bg-purple-500/10 text-purple-400 border-purple-500/30" 
-      };
-    }
-
-    return { 
-      text: "AVAILABLE", 
-      subtext: nextMeeting ? `Until ${formatTime(nextMeeting.start_time)}` : "", 
-      style: "bg-slate-900/40 text-slate-400 border-slate-800" 
-    };
-  };
-
-  if (!room) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 font-mono text-xs tracking-widest">LOADING...</div>;
+  if (!room) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 font-mono text-sm tracking-widest">LOADING...</div>;
 
   if (currentPage === 'schedule') {
     return <SchedulePage bookings={bookings} renderHeader={renderHeader} goHome={() => setCurrentPage('dashboard')} />;
@@ -208,56 +339,143 @@ function App() {
     return <BookingPage roomId={room.id} renderHeader={renderHeader} goHome={() => setCurrentPage('dashboard')} onSuccess={fetchBookings} />;
   }
 
-  const nextMeeting = getUpcomingMeeting();
-
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between p-8 font-sans overflow-hidden select-none">
-      {renderHeader()}
-
-      <div className="flex-1 flex flex-col items-center justify-center gap-6 my-4">
-        <StatusDisplay currentStatus={getRoomStatus()} />
-        
-        {nextMeeting ? (
-          <div className="bg-slate-900/40 border border-slate-800 backdrop-blur-md px-6 py-3 rounded-full flex items-center gap-3 shadow-lg max-w-xl animate-fade-in">
-            <span className="flex h-2 w-2 rounded-full bg-indigo-400 animate-ping" />
-            <p className="text-sm text-slate-400 font-medium tracking-wide">
-              Next: <span className="text-slate-200 font-semibold">{nextMeeting.is_private ? "🔒 Private Meeting" : nextMeeting.title}</span> 
-              <span className="mx-2 text-slate-600">|</span> 
-              🕒 {formatTime(nextMeeting.start_time)} - {formatTime(nextMeeting.end_time)}
-              <span className="mx-2 text-slate-600">|</span> 
-              Host: <span className="text-indigo-400 font-medium">{nextMeeting.users?.full_name || "Unknown"}</span>
-            </p>
+    <div className={`h-screen w-screen max-h-screen bg-gradient-to-br ${currentStatus.bgStyle} text-slate-100 p-6 sm:p-8 lg:p-12 font-sans transition-all duration-1000 ease-in-out overflow-hidden select-none relative flex flex-col justify-between`}>  
+      <div className={`absolute top-6 left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] ${showToast ? 'translate-y-4 opacity-100' : '-translate-y-12 opacity-0 pointer-events-none'}`}>
+        <div className="bg-black/70 backdrop-blur-xl border border-white/10 px-6 py-3.5 rounded-full shadow-[0_24px_50px_-12px_rgba(0,0,0,0.5)] flex items-center gap-3 w-max">
+          <div className="bg-emerald-500 rounded-full p-1 text-black flex items-center justify-center shadow-inner">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="size-4">
+              <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+            </svg>
           </div>
-        ) : (
-          <div className="bg-slate-900/10 border border-slate-900/60 px-6 py-3 rounded-full text-3xl text-slate-600 font-medium tracking-wide">
-            No more meetings scheduled for today
-          </div>
-        )}
+          <span className="text-white text-sm sm:text-base font-semibold tracking-tight">Check-in Successful</span>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-40 items-end">
-        <button 
-          onClick={() => setCurrentPage('schedule')}
-          className="group relative bg-slate-900/50 hover:bg-slate-900 border border-slate-800/80 p-6 rounded-2xl h-full flex flex-col justify-between text-left transition-all duration-300 hover:border-slate-700 shadow-xl"
-        >
-          <div className="bg-slate-800/80 w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 group-hover:text-white transition">📅</div>
-          <div>
-            <h3 className="text-sm font-bold text-slate-200">Schedule</h3>
-          </div>
-        </button>
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] sm:w-[600px] lg:w-[800px] h-[400px] sm:h-[600px] lg:h-[800px] rounded-full filter blur-[140px] pointer-events-none opacity-65 mix-blend-screen transition-all duration-1000 ease-in-out animate-pulse" />
 
-        <button 
-          onClick={() => setCurrentPage('booking')}
-          className="group relative bg-indigo-600 hover:bg-indigo-500 border border-indigo-500/30 p-6 rounded-2xl h-full flex flex-col justify-between text-left transition-all duration-300 shadow-xl shadow-indigo-950/20"
-        >
-          <div className="bg-white/10 w-10 h-10 rounded-xl flex items-center justify-center text-white">⚡</div>
-          <div>
-            <h3 className="text-sm font-bold text-white">Quick Book</h3>
+      <div className="z-10 grid grid-rows-[auto_1fr_auto] h-full w-full gap-4 sm:gap-6">
+        {renderHeader()}
+
+        <div className="flex flex-col items-center justify-center gap-4 px-2 w-full max-w-7xl mx-auto text-center min-h-0">
+          <div className="w-full flex justify-center items-center shrink-0 max-w-full px-4">
+            <StatusDisplay currentStatus={currentStatus} />
           </div>
-        </button>
+          
+          {meetingToDisplay ? (
+            <div className="bg-white/10 border border-white/20 p-6 sm:p-10 rounded-[4rem] sm:rounded-[6rem] w-full max-w-6xl flex flex-row items-center gap-6 sm:gap-10 text-left transition-all duration-300 shadow-2xl backdrop-blur-xl overflow-hidden flex-1 max-h-[45%] animate-fade-in">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-14 sm:size-24 lg:size-28 text-white/90 flex-shrink-0">
+                <path d="M4.5 4.5a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h8.25a3 3 0 0 0 3-3v-9a3 3 0 0 0-3-3H4.5ZM19.94 18.75l-2.69-2.69V7.94l2.69-2.69c.944-.945 2.56-.276 2.56 1.06v11.38c0 1.336-1.616 2.005-2.56 1.06Z" />
+              </svg>
+              
+              <div className="flex flex-col min-w-0 flex-1 justify-center gap-1 sm:gap-3 overflow-hidden">
+                <h3 className="text-xs sm:text-lg lg:text-3xl font-medium text-white/70">
+                  Next Meeting:
+                </h3>
+                
+                <h4 className="text-xl sm:text-4xl lg:text-6xl font-bold text-white tracking-tight leading-tight select-text truncate whitespace-nowrap max-w-full block">
+                  {meetingToDisplay.is_private ? "Private Meeting" : meetingToDisplay.title}
+                </h4>
+                
+                <div className="flex flex-row gap-4 sm:gap-6 items-center flex-wrap lg:flex-nowrap text-white font-medium mt-1 sm:mt-2">
+                  <div className="flex flex-col justify-start">
+                    <div className="flex flex-row items-center gap-2.5 shrink-0">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5 sm:size-8 text-white/80">
+                        <path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25ZM12.75 6a.75.75 0 0 0-1.5 0v6c0 .414.336.75.75.75h4.5a.75.75 0 0 0 0-1.5h-3.75V6Z" clipRule="evenodd" />
+                      </svg>
+                      <span className="text-sm sm:text-2xl lg:text-3xl font-medium tracking-wide">
+                        {formatTime(meetingToDisplay.start_time)} - {formatTime(meetingToDisplay.end_time)}
+                      </span>
+                    </div>
+                  </div>
+                  
+                  <span className="hidden lg:inline text-white/30 text-3xl font-light self-start">|</span>
+
+                  <div className="flex flex-row items-center gap-2.5 min-w-0 self-start">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-5 sm:size-8 text-white/80">
+                      <path fillRule="evenodd" d="M7.5 6a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM3.751 20.105a8.25 8.25 0 0 1 16.498 0 .75.75 0 0 1-.437.695A18.683 18.683 0 0 1 12 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 0 1-.437-.695Z" clipRule="evenodd" />
+                    </svg>
+                    <span className="text-sm sm:text-2xl lg:text-3xl font-medium truncate max-w-[200px] sm:max-w-md">
+                      {meetingToDisplay.users?.full_name || "Organizer"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white/5 border border-white/10 p-6 sm:p-10 rounded-[4rem] sm:rounded-[6rem] w-full max-w-6xl flex flex-row items-center gap-6 sm:gap-10 text-left shadow-xl backdrop-blur-md flex-1 max-h-[40%] shrink">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="size-14 sm:size-24 lg:size-28 text-white/30 flex-shrink-0">
+                <path d="M4.5 4.5a3 3 0 0 0-3 3v9a3 3 0 0 0 3 3h8.25a3 3 0 0 0 3-3v-9a3 3 0 0 0-3-3H4.5ZM19.94 18.75l-2.69-2.69V7.94l2.69-2.69c.944-.945 2.56-.276 2.56 1.06v11.38c0 1.336-1.616 2.005-2.56 1.06Z" />
+              </svg>
+              <div className="flex flex-col min-w-0 flex-1 justify-center gap-2">
+                <h3 className="text-xs sm:text-lg lg:text-3xl font-medium text-white/70">Next Meeting:</h3>
+                <h4 className="text-xl sm:text-4xl lg:text-5xl font-black text-white/20 tracking-tight">No Upcoming Meetings</h4>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Row 3: Contextual Footer layout cleanly segmented */}
+        <div className="w-full pt-4 sm:pt-6 pb-2 shrink-0 overflow-visible relative">
+          <div className="flex flex-row justify-between items-center w-full gap-4">
+            
+            {/* Bottom Left: Schedule Button */}
+            {currentStatus.text === "AVAILABLE" ? (
+              <button 
+                onClick={() => setCurrentPage('schedule')}
+                className="group relative bg-white/10 hover:bg-white/20 border border-white/20 p-4 rounded-[1.5rem] sm:rounded-[2rem] w-40 sm:w-72 flex flex-row items-center justify-center gap-2 sm:gap-3 transition-all duration-300 hover:border-white/40 shadow-2xl whitespace-nowrap backdrop-blur-xl h-12 sm:h-20 z-10"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-5 sm:size-8 text-slate-200 group-hover:text-white transition-colors">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z" />
+                </svg>
+                <span className="text-sm sm:text-2xl font-black text-white">Schedule</span>
+              </button>
+            ) : (
+              <div className="w-40 sm:w-72 hidden sm:block pointer-events-none" />
+            )}
+
+            {/* Bottom Center: Warning notification ticker */}
+            {showRoomWarning && (
+              <div className="absolute left-1/2 -translate-x-1/2 flex flex-row items-center gap-2 text-amber-400 font-medium max-w-[40%] text-center justify-center pointer-events-none animate-fade-in px-2 z-10">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-5 sm:size-6 shrink-0 animate-pulse">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+                </svg>
+                <span className="text-xs sm:text-base font-bold tracking-tight whitespace-normal leading-tight">
+                  {warningLabelText}
+                </span>
+              </div>
+            )}
+
+            {/* Bottom Right Contextual Call-to-Actions */}
+            {showCheckInButton ? (
+              <button 
+                onClick={handleCheckIn}
+                className="group relative ml-auto bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/40 p-4 rounded-[1.5rem] sm:rounded-[2rem] w-40 sm:w-72 flex flex-row items-center justify-center gap-2 sm:gap-3 transition-all duration-300 shadow-2xl whitespace-nowrap backdrop-blur-xl h-12 sm:h-20"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-5 sm:size-8 text-amber-400">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+                <span className="text-sm sm:text-2xl font-black text-amber-300 uppercase">Check In</span>
+              </button>
+            ) : currentStatus.text !== "AVAILABLE" ? (
+              <div className="w-40 sm:w-72 h-12 sm:h-20 ml-auto" />
+            ) : (
+              <button 
+                onClick={() => setCurrentPage('booking')}
+                className="group relative ml-auto bg-white/10 hover:bg-white/20 border border-white/20 p-4 rounded-[1.5rem] sm:rounded-[2rem] w-40 sm:w-72 flex flex-row items-center justify-center gap-2 sm:gap-3 transition-all duration-300 hover:border-white/40 shadow-2xl whitespace-nowrap backdrop-blur-xl h-12 sm:h-20"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-5 sm:size-8 text-slate-200 group-hover:text-white transition-colors">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+                <span className="text-sm sm:text-2xl font-black text-white">Quick Book</span>
+              </button>
+            )}
+
+          </div>
+        </div>
       </div>
 
-      <OccupancySensor roomId={room.id} />
+      <OccupancySensor roomId={room.id} onOccupancyChange={setIsPersonDetected} />
     </div>
   );
 }
