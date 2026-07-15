@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../supabaseClient';
+import DatePicker from './DatePicker'; 
 
 export default function BookingPage({ roomId, renderHeader, goHome, onSuccess }) {
   const [title, setTitle] = useState('');
   const [selectedUserId, setSelectedUserId] = useState('');
   
-  // FIX: Safely initialize initial state using local YYYY-MM-DD instead of .toISOString()
   const [date, setDate] = useState(() => {
     const d = new Date();
     const year = d.getFullYear();
@@ -17,59 +17,31 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('10:00');
   const [isPrivate, setIsPrivate] = useState(false);
-  const [teamsLink, setTeamsLink] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
 
-  // Embedded contextual Toast notification controls 
+  // Dropdown open states
+  const [isStartOpen, setIsStartOpen] = useState(false);
+  const [isEndOpen, setIsEndOpen] = useState(false);
+  const [isUserOpen, setIsUserOpen] = useState(false);
+
+  // Dropdown references for outside click closing
+  const startRef = useRef(null);
+  const endRef = useRef(null);
+  const userRef = useRef(null);
+
   const [showToast, setShowToast] = useState(false);
-  const [toastType, setToastType] = useState('success'); // 'success' | 'error'
+  const [toastType, setToastType] = useState('success'); 
   const [toastMessage, setToastMessage] = useState('');
 
   const [usersList, setUsersList] = useState([]);
   const [allBookingsOnDate, setAllBookingsOnDate] = useState([]);
-  
-  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
-  const [pickerMonth, setPickerMonth] = useState(new Date().getMonth());
-  const [pickerYear, setPickerYear] = useState(new Date().getFullYear());
 
-  const todayDate = useMemo(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d;
-  }, []);
+  const parsedDatePickerObject = React.useMemo(() => {
+    const [year, month, day] = date.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }, [date]);
 
-  const yearsArray = useMemo(() => {
-    const currentY = new Date().getFullYear();
-    const range = [];
-    for (let y = currentY - 2; y <= currentY + 5; y++) {
-      range.push(y);
-    }
-    return range;
-  }, []);
-
-  const monthsArray = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December"
-  ];
-
-  const calendarGridDays = useMemo(() => {
-    const firstDayOfMonth = new Date(pickerYear, pickerMonth, 1);
-    const lastDayOfMonth = new Date(pickerYear, pickerMonth + 1, 0);
-    
-    const totalDays = lastDayOfMonth.getDate();
-    const startingDayOfWeek = firstDayOfMonth.getDay();
-    
-    const days = [];
-    for (let i = 0; i < startingDayOfWeek; i++) {
-      days.push(null);
-    }
-    for (let day = 1; day <= totalDays; day++) {
-      days.push(new Date(pickerYear, pickerMonth, day));
-    }
-    return days;
-  }, [pickerMonth, pickerYear]);
-
-  // Handle auto-closing toast timelines
   useEffect(() => {
     if (showToast) {
       const timer = setTimeout(() => setShowToast(false), 3500);
@@ -99,6 +71,17 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     fetchDaySchedule();
   }, [date]);
 
+  // Handle clicking outside of custom dropdown menus to close them
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (startRef.current && !startRef.current.contains(event.target)) setIsStartOpen(false);
+      if (endRef.current && !endRef.current.contains(event.target)) setIsEndOpen(false);
+      if (userRef.current && !userRef.current.contains(event.target)) setIsUserOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const generateTimeSlots = () => {
     const slots = [];
     for (let hour = 0; hour < 24; hour++) {
@@ -112,6 +95,15 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   };
 
   const timeSlots = generateTimeSlots();
+
+  const formatToAmPm = (timeStr) => {
+    if (!timeStr) return '';
+    const [hourStr, minStr] = timeStr.split(':');
+    const hour = parseInt(hourStr, 10);
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour % 12 === 0 ? 12 : hour % 12;
+    return `${displayHour}:${minStr} ${ampm}`;
+  };
 
   const getFilteredStartTimes = () => {
     return timeSlots.filter(time => {
@@ -200,30 +192,22 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     }
   };
 
-  // FIX: Safely build local date template blocks instead of parsing via .toISOString()
-  const handleSelectCalendarDay = (dateObj) => {
-    if (!dateObj) return;
-    const year = dateObj.getFullYear();
-    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const day = String(dateObj.getDate()).padStart(2, '0');
-    
-    setDate(`${year}-${month}-${day}`);
+  const handleDateChangeFromPicker = (incomingDateObj) => {
+    if (incomingDateObj instanceof Date && !isNaN(incomingDateObj)) {
+      const year = incomingDateObj.getFullYear();
+      const month = String(incomingDateObj.getMonth() + 1).padStart(2, '0');
+      const day = String(incomingDateObj.getDate()).padStart(2, '0');
+      setDate(`${year}-${month}-${day}`);
+    }
     setIsDatePickerOpen(false);
   };
 
-  const handleOpenPicker = () => {
-    // Safely parse local components to open target frame
-    const [y, m, d] = date.split('-').map(Number);
-    const currentSelection = new Date(y, m - 1, d);
-    setPickerMonth(currentSelection.getMonth());
-    setPickerYear(currentSelection.getFullYear());
-    setIsDatePickerOpen(true);
-  };
+  const selectedUser = usersList.find(u => u.id === selectedUserId);
 
   return (
-    <div className="min-h-screen w-full bg-[#C7C7CC] text-slate-100 p-6 sm:p-8 lg:p-12 font-sans overflow-hidden select-none relative flex flex-col justify-between">
+    <div className="min-h-screen w-full bg-[#ECECEC] text-slate-100 p-6 font-sans overflow-hidden select-none relative flex flex-col justify-between">
       
-      {/* APP STYLE DYNAMIC TOAST SHEETS */}
+      {/* TOAST SYSTEM */}
       <div className={`absolute top-6 left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] ${showToast ? 'translate-y-4 opacity-100' : '-translate-y-12 opacity-0 pointer-events-none'}`}>
         <div className="bg-black/70 backdrop-blur-xl border border-white/10 px-6 py-3.5 rounded-full shadow-[0_24px_50px_-12px_rgba(0,0,0,0.5)] flex items-center gap-3 w-max">
           {toastType === 'success' ? (
@@ -243,190 +227,218 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
         </div>
       </div>
 
-      {/* Top Content Stack */}
+      {/* Top Content Layout */}
       <div className="z-10 flex flex-col justify-start items-start h-full w-full gap-5 sm:gap-6 min-h-0 flex-1">
         
-        <div className="text-white w-full text-left">
+        <div className="w-full text-left shrink-0">
           {renderHeader()}
         </div>
 
-        {/* Dynamic Layout Control Row synced with Schedule View Layout */}
-        <div className="flex items-center justify-between w-full mb-1 gap-4">
-          <h2 className="text-2xl sm:text-4xl font-semibold tracking-tight text-white">
+        <div className="flex items-center justify-between w-full gap-2">
+          <h2 className="text-[1.35rem] sm:text-[1.7rem] lg:text-[2rem] font-semibold tracking-tight text-black">
             Quick Book
           </h2>
-
           <button 
+            type="button"
             onClick={goHome}
             aria-label="Close"
-            className="bg-white/10 hover:bg-white/20 text-white backdrop-blur-sm border border-white/20 rounded-full w-12 h-12 flex items-center justify-center transition shadow-lg group shrink-0"
+            className="bg-white hover:bg-[#E5E5EA] active:scale-95 text-black border border-neutral-200 rounded-full w-11 h-11 flex items-center justify-center transition shadow-sm shrink-0"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-5 group-hover:scale-110 transition-transform">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-4 opacity-70">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        {/* Schedule Style Frosted Glass Platter View */}
-        <div className="bg-white/70 backdrop-blur-xl border border-white/20 rounded-3xl overflow-hidden shadow-2xl w-full flex flex-col min-h-0 flex-1 p-6 sm:p-8">
-          <form onSubmit={handleBooking} className="w-full flex flex-col justify-between h-full space-y-6 overflow-y-auto pr-1">
-            <div className="space-y-6 text-left">
+        {/* Main Platter Box */}
+        <div className="bg-white backdrop-blur-xl border border-neutral-200/70 rounded-[2rem] overflow-visible shadow-[0_20px_50px_rgba(0,0,0,0.08)] w-full flex flex-col min-h-0 flex-1 p-6 sm:p-8 lg:p-10">
+          <form onSubmit={handleBooking} className="w-full flex flex-col justify-between h-full space-y-8 overflow-visible pr-1">
+            <div className="space-y-7 sm:space-y-8 text-left">
               
-              {/* Title Input & Privacy Switch Row */}
-              <div className="flex flex-col md:flex-row gap-5 items-stretch md:items-end">
-                <div className="flex-1 flex flex-col gap-2 w-full">
-                  <label className="text-slate-700 font-bold text-sm sm:text-base flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="size-5 text-slate-500">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                    </svg>
-                    Title
+              {/* Row 1: Title Input Row */}
+              <div className="flex items-start gap-4 w-full">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-slate-400 shrink-0 mt-2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                </svg>
+
+                <div className="flex-1 flex flex-col sm:flex-row gap-4 justify-between items-end border-b border-slate-200 focus-within:border-slate-800 transition-colors pb-2 w-full">
+                  <div className="flex-1 flex flex-col gap-0.5 w-full">
+                    <label className="text-slate-400 font-bold text-xs uppercase tracking-wider">
+                      Title
+                    </label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g., 'Project Sync'"
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      className="h-11 bg-transparent border-none p-0 text-base sm:text-lg font-semibold text-slate-900 focus:outline-none focus:ring-0 w-full"
+                      required
+                    />
+                  </div>
+
+                  <label className="flex items-center gap-2 cursor-pointer select-none mb-1 text-slate-700 shrink-0">
+                    <div className="relative">
+                      <input 
+                        type="checkbox" 
+                        checked={isPrivate}
+                        onChange={(e) => setIsPrivate(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-10 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:bg-[#34C759] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                    </div>
+                    <span className="font-semibold text-sm tracking-tight text-slate-600">
+                      Private
+                    </span>
                   </label>
-                  <input 
-                    type="text" 
-                    placeholder="e.g., 'Project Sync'"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    className="h-14 bg-white/60 backdrop-blur-sm border border-slate-200 rounded-2xl p-4 text-base font-bold text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-slate-300 transition-all w-full shadow-sm"
-                    required
-                  />
-                </div>
-
-                {/* Private Meeting Toggle switch */}
-                <label className="flex items-center justify-between px-5 h-14 bg-white/60 backdrop-blur-sm rounded-2xl border border-slate-200 cursor-pointer md:w-64 w-full shrink-0 select-none hover:bg-white transition-colors shadow-sm">
-                  <span className="text-slate-700 font-bold text-sm sm:text-base flex items-center gap-2">
-                    Private Meeting
-                  </span>
-                  <div className="relative">
-                    <input 
-                      type="checkbox" 
-                      checked={isPrivate}
-                      onChange={(e) => setIsPrivate(e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#1F1F21]"></div>
-                  </div>
-                </label>
-              </div>
-
-              {/* User Dropdown Selector Row */}
-              <div className="flex flex-col gap-2">
-                <label className="text-slate-700 font-bold text-sm sm:text-base flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="size-5 text-slate-500">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                  </svg>
-                  Organizer
-                </label>
-                <div className="relative">
-                  <select
-                    value={selectedUserId}
-                    onChange={(e) => setSelectedUserId(e.target.value)}
-                    className="h-14 bg-white/60 backdrop-blur-sm border border-slate-200 rounded-2xl px-4 text-base font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-slate-300 w-full cursor-pointer appearance-none shadow-sm"
-                    required
-                  >
-                    <option value="" disabled hidden>Select your verified profile account</option>
-                    {usersList.map(u => (
-                      <option key={u.id} value={u.id} className="bg-white text-slate-900 font-medium">
-                        {u.full_name} ({u.email})
-                      </option>
-                    ))}
-                  </select>
-                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-slate-500">
-                    <svg className="fill-current h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                  </div>
                 </div>
               </div>
 
-              {/* Window Segment Inner Platter */}
-              <div className="bg-white/40 border border-white/40 p-5 sm:p-6 rounded-2xl space-y-4 shadow-sm">
-                <span className="text-xs text-indigo-800 font-black uppercase tracking-wider flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  Reservation Window
-                </span>
-                
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* Row 2: Date and Time Controls Field */}
+              <div className="flex items-start gap-4 w-full">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-slate-400 shrink-0 mt-2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+
+                <div className="flex-1 flex flex-col gap-1 border-b border-slate-200 focus-within:border-slate-800 transition-colors pb-2.5 w-full">
+                  <label className="text-slate-400 font-bold text-xs uppercase tracking-wider">
+                    Date and Time
+                  </label>
                   
-                  {/* Customized Screen Picker Trigger */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-slate-700 font-bold text-sm sm:text-base">Target Date</label>
-                    <button
-                      type="button"
-                      onClick={handleOpenPicker}
-                      className="h-14 bg-white border border-slate-200 rounded-2xl px-4 text-base font-bold text-slate-800 focus:outline-none w-full text-left flex justify-between items-center hover:bg-slate-50 transition-colors shadow-sm"
-                    >
-                      <span>
-                        {(() => {
-                          const [y, m, d] = date.split('-').map(Number);
-                          return new Date(y, m - 1, d).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
-                        })()}
-                      </span>
-                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-5 text-slate-500">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" />
-                      </svg>
-                    </button>
-                  </div>
-
-                  {/* Start Time Select */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-slate-700 font-bold text-sm sm:text-base">Start Time</label>
-                    <div className="relative">
-                      <select 
-                        value={startTime} 
-                        onChange={(e) => setStartTime(e.target.value)} 
-                        className="h-14 bg-white border border-slate-200 rounded-2xl px-4 text-base font-bold text-slate-800 focus:outline-none w-full cursor-pointer appearance-none shadow-sm"
+                  <div className="relative flex flex-wrap items-center gap-3 mt-1">
+                    
+                    {/* Start Time Apple Dropdown */}
+                    <div className="relative min-w-[126px]" ref={startRef}>
+                      <button
+                        type="button"
+                        onClick={() => setIsStartOpen(!isStartOpen)}
+                        className="w-full flex items-center justify-between rounded-[10px] border border-black/[0.08] bg-black/[0.04] active:bg-black/[0.08] px-3 py-2 text-[13px] sm:text-[14px] font-medium tracking-tight text-slate-800 transition-all cursor-pointer"
                       >
-                        {availableStartTimes.map(time => (
-                          <option key={time} value={time} className="text-slate-900 font-semibold">{time}</option>
-                        ))}
-                      </select>
-                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-slate-500">
-                        <svg className="fill-current h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                      </div>
-                    </div>
-                  </div>
+                        <span>{formatToAmPm(startTime)}</span>
+                        <svg className="h-3 w-3 text-slate-500 opacity-70 ml-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"/></svg>
+                      </button>
 
-                  {/* End Time Select */}
-                  <div className="flex flex-col gap-2">
-                    <label className="text-slate-700 font-bold text-sm sm:text-base">End Time</label>
-                    <div className="relative">
-                      <select 
-                        value={endTime} 
-                        onChange={(e) => setEndTime(e.target.value)} 
-                        className="h-14 bg-white border border-slate-200 rounded-2xl px-4 text-base font-bold text-slate-800 focus:outline-none w-full cursor-pointer appearance-none shadow-sm"
+                      {isStartOpen && (
+                        <div className="absolute left-0 top-full mt-1.5 w-40 max-h-60 overflow-y-auto z-[70] bg-[#FAF9F6]/95 backdrop-blur-xl border border-black/[0.06] rounded-[12px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-1 scrollbar-thin">
+                          {availableStartTimes.map(time => (
+                            <button
+                              key={time}
+                              type="button"
+                              onClick={() => { setStartTime(time); setIsStartOpen(false); }}
+                              className={`w-full text-left px-3 py-1.5 text-[13px] rounded-[8px] flex items-center justify-between ${time === startTime ? 'bg-[#007AFF] text-white font-medium' : 'text-slate-900 hover:bg-black/[0.04] font-normal'}`}
+                            >
+                              <span>{formatToAmPm(time)}</span>
+                              {time === startTime && (
+                                <svg className="h-3.5 w-3.5 fill-current" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <span className="text-base font-semibold text-slate-400">-</span>
+                    
+                    {/* End Time Apple Dropdown */}
+                    <div className="relative min-w-[126px]" ref={endRef}>
+                      <button
+                        type="button"
+                        onClick={() => setIsEndOpen(!isEndOpen)}
+                        className="w-full flex items-center justify-between rounded-[10px] border border-black/[0.08] bg-black/[0.04] active:bg-black/[0.08] px-3 py-2 text-[13px] sm:text-[14px] font-medium tracking-tight text-slate-800 transition-all cursor-pointer"
                       >
-                        {availableEndTimes.map(time => (
-                          <option key={time} value={time} className="text-slate-900 font-semibold">{time}</option>
-                        ))}
-                      </select>
-                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-slate-500">
-                        <svg className="fill-current h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                      </div>
-                    </div>
-                  </div>
+                        <span>{formatToAmPm(endTime)}</span>
+                        <svg className="h-3 w-3 text-slate-500 opacity-70 ml-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"/></svg>
+                      </button>
 
+                      {isEndOpen && (
+                        <div className="absolute left-0 top-full mt-1.5 w-40 max-h-60 overflow-y-auto z-[70] bg-[#FAF9F6]/95 backdrop-blur-xl border border-black/[0.06] rounded-[12px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-1 scrollbar-thin">
+                          {availableEndTimes.map(time => (
+                            <button
+                              key={time}
+                              type="button"
+                              onClick={() => { setEndTime(time); setIsEndOpen(false); }}
+                              className={`w-full text-left px-3 py-1.5 text-[13px] rounded-[8px] flex items-center justify-between ${time === endTime ? 'bg-[#007AFF] text-white font-medium' : 'text-slate-900 hover:bg-black/[0.04] font-normal'}`}
+                            >
+                              <span>{formatToAmPm(time)}</span>
+                              {time === endTime && (
+                                <svg className="h-3.5 w-3.5 fill-current" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="relative">
+                      {/* DatePicker Menu Launcher Tag */}
+                      <button
+                        type="button"
+                        onClick={() => setIsDatePickerOpen(prev => !prev)}
+                        className="rounded-[10px] border border-black/[0.08] bg-black/[0.04] active:bg-black/[0.08] px-3 py-2 text-[13px] sm:text-[14px] font-medium tracking-tight text-slate-800 transition-all flex items-center gap-2"
+                      >
+                        <span>
+                          {(() => {
+                            const [y, m, d] = date.split('-').map(Number);
+                            return new Date(y, m - 1, d).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+                          })()}
+                        </span>
+                      </button>
+
+                      {/* Mounted Here: anchored directly under the date button */}
+                      {isDatePickerOpen && (
+                        <div className="absolute left-0 top-full mt-2 z-[60]">
+                          <DatePicker 
+                            isOpen={isDatePickerOpen}
+                            selectedDate={parsedDatePickerObject} 
+                            onSelectDate={handleDateChangeFromPicker} 
+                            onClose={() => setIsDatePickerOpen(false)} 
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
                 </div>
               </div>
 
-              {/* Teams Integration Row (with toggle) */}
-              <div className="pt-2">
-                <label className="flex items-center justify-between p-4 bg-white/60 backdrop-blur-sm rounded-2xl border border-slate-200 cursor-pointer select-none hover:bg-white transition-colors shadow-sm">
-                  <span className="text-slate-700 font-bold text-sm sm:text-base flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="size-5 text-slate-500">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25A2.25 2.25 0 015.25 3h13.5A2.25 2.25 0 0121 5.25z" />
-                    </svg>
-                    Teams Meeting
-                  </span>
-                  <div className="relative">
-                    <input 
-                      type="checkbox" 
-                      checked={teamsLink}
-                      onChange={(e) => setTeamsLink(e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white handler-toggle after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#1F1F21]"></div>
-                  </div>
-                </label>
+              {/* Row 3: Organizer Selection Apple Dropdown */}
+              <div className="flex items-start gap-4 w-full">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="size-7 text-slate-400 shrink-0 mt-2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                </svg>
+                <div className="flex-1 flex flex-col gap-0.5 relative border-b border-slate-200 focus-within:border-slate-800 transition-colors pb-2 w-full" ref={userRef}>
+                  <label className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">
+                    Booked By
+                  </label>
+                  
+                  <button
+                    type="button"
+                    onClick={() => setIsUserOpen(!isUserOpen)}
+                    className="h-11 w-full text-left bg-transparent border-none pl-0 pr-8 text-base sm:text-lg font-semibold text-slate-900 focus:outline-none flex items-center justify-between cursor-pointer"
+                  >
+                    <span className={selectedUserId ? 'text-slate-900' : 'text-slate-400 font-normal'}>
+                      {selectedUser ? `${selectedUser.full_name} (${selectedUser.email})` : 'Select your verified profile account'}
+                    </span>
+                    <svg className="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"/></svg>
+                  </button>
+
+                  {isUserOpen && (
+                    <div className="absolute left-0 bottom-full mb-1 w-full max-h-56 overflow-y-auto z-[70] bg-[#FAF9F6]/95 backdrop-blur-xl border border-black/[0.06] rounded-[14px] shadow-[0_10px_35px_rgba(0,0,0,0.18)] p-1.5 scrollbar-thin">
+                      {usersList.map(u => (
+                        <button
+                          key={u.id}
+                          type="button"
+                          onClick={() => { setSelectedUserId(u.id); setIsUserOpen(false); }}
+                          className={`w-full text-left px-3 py-2.5 my-0.5 text-sm rounded-[8px] flex items-center justify-between ${u.id === selectedUserId ? 'bg-[#007AFF] text-white font-medium' : 'text-slate-900 hover:bg-black/[0.04] font-medium'}`}
+                        >
+                          <span className="truncate">{u.full_name} <span className={`text-xs ml-1 ${u.id === selectedUserId ? 'text-white/80' : 'text-slate-400 font-normal'}`}>({u.email})</span></span>
+                          {u.id === selectedUserId && (
+                            <svg className="h-4 w-4 fill-current shrink-0 ml-2" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
             </div>
@@ -434,100 +446,24 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
         </div>
       </div>
 
-      {/* Action Footer Button Layout */}
+      {/* Action Footer Platter Controls */}
       <div className="w-full pt-4 mt-4 shrink-0 flex justify-end items-center z-10 px-0">
         <button 
           type="button"
           onClick={() => handleBooking()}
           disabled={isSubmitting || !availableStartTimes.length}
-          className="bg-[#1F1F21] hover:bg-neutral-800 text-white font-extrabold px-8 py-3.5 rounded-2xl text-base transition disabled:opacity-40 shadow-xl flex items-center gap-2"
+          className="bg-[#007AFF] hover:bg-[#0066CC] active:scale-[0.98] text-white font-medium px-12 py-2.5 rounded-[2rem] text-[15px] sm:text-[20px] tracking-tight transition-all duration-200 disabled:opacity-30 disabled:pointer-events-none shadow-sm flex items-center gap-2"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-5">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-          </svg>
-          {isSubmitting ? 'Confirming...' : 'Reserve Space'}
+          {isSubmitting && (
+            <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          )}
+          <span>{isSubmitting ? 'Booking...' : 'Book'}</span>
         </button>
       </div>
 
-      {/* COHESIVE LARGER FULL-SCREEN DATE PICKER MODAL */}
-      {isDatePickerOpen && (
-        <div className="absolute inset-0 z-50 bg-[#C7C7CC]/60 backdrop-blur-2xl flex flex-col justify-center items-center p-4 sm:p-8 md:p-12 animate-fade-in">
-          <div className="w-full max-w-4xl bg-white/95 backdrop-blur-xl border border-white/40 rounded-[2rem] p-6 sm:p-10 shadow-2xl relative flex flex-col gap-6 md:gap-8 my-auto">
-            
-            <div className="flex flex-col sm:flex-row gap-4 justify-between sm:items-center border-b border-slate-200/60 pb-6">
-              <div className="flex items-center gap-4">
-                <select 
-                  value={pickerMonth} 
-                  onChange={(e) => setPickerMonth(parseInt(e.target.value, 10))}
-                  className="bg-[#8E8E93]/15 hover:bg-[#8E8E93]/25 text-[#1F1F21] font-black text-xl md:text-2xl px-5 py-3 rounded-2xl focus:outline-none border border-slate-200/50 transition-all cursor-pointer appearance-none shadow-sm pr-10 relative bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2F2000%2Fsvg%22%20viewBox%3D%220%200%2020%2020%20%22%20fill%3D%22%231F1F21%22%3E%3Cpath%20d%3D%22M5.22%208.22a.75.75%200%20011.06%200L10%2011.94l3.72-3.72a.75.75%200%20111.06%201.06l-4.25%204.25a.75.75%200%2001-1.06%200L5.22%209.28a.75.75%200%20010-1.06z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:1.5rem] bg-[right_0.75rem_center] bg-no-repeat"
-                >
-                  {monthsArray.map((mName, index) => (
-                    <option key={index} value={index}>{mName}</option>
-                  ))}
-                </select>
-
-                <select 
-                  value={pickerYear} 
-                  onChange={(e) => setPickerYear(parseInt(e.target.value, 10))}
-                  className="bg-[#8E8E93]/15 hover:bg-[#8E8E93]/25 text-[#1F1F21] font-black text-xl md:text-2xl px-5 py-3 rounded-2xl focus:outline-none border border-slate-200/50 transition-all cursor-pointer appearance-none shadow-sm pr-10 relative bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2F2000%2Fsvg%22%20viewBox%3D%220%200%2020%2020%20%22%20fill%3D%22%231F1F21%22%3E%3Cpath%20d%3D%22M5.22%208.22a.75.75%200%20011.06%200L10%2011.94l3.72-3.72a.75.75%200%20111.06%201.06l-4.25%204.25a.75.75%200%2001-1.06%200L5.22%209.28a.75.75%200%20010-1.06z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:1.5rem] bg-[right_0.75rem_center] bg-no-repeat"
-                >
-                  {yearsArray.map((yearVal) => (
-                    <option key={yearVal} value={yearVal}>{yearVal}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <button 
-                type="button"
-                onClick={() => setIsDatePickerOpen(false)}
-                className="bg-[#1F1F21] hover:bg-neutral-800 text-white rounded-2xl px-8 py-3 text-base font-bold transition-all shadow-md"
-              >
-                Close Calendar
-              </button>
-            </div>
-
-            <div className="grid grid-cols-7 text-center text-sm font-black tracking-widest text-slate-400 uppercase border-b border-slate-100 pb-3">
-              <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
-            </div>
-
-            <div className="grid grid-cols-7 gap-3 md:gap-4 flex-1 items-center">
-              {calendarGridDays.map((dayObj, idx) => {
-                if (dayObj === null) {
-                  return <div key={`empty-${idx}`} className="h-16 sm:h-20 w-full invisible" />;
-                }
-
-                // FIX: Map calendar layout directly via local component methods
-                const year = dayObj.getFullYear();
-                const month = String(dayObj.getMonth() + 1).padStart(2, '0');
-                const day = String(dayObj.getDate()).padStart(2, '0');
-                const blockDateStr = `${year}-${month}-${day}`;
-                
-                const isActiveSelection = blockDateStr === date;
-                const isSystemToday = dayObj.getTime() === todayDate.getTime();
-
-                return (
-                  <button
-                    key={blockDateStr}
-                    type="button"
-                    onClick={() => handleSelectCalendarDay(dayObj)}
-                    className={`h-16 sm:h-20 w-full rounded-2xl font-bold text-lg md:text-xl flex flex-col items-center justify-center relative transition-all border shadow-sm ${
-                      isActiveSelection
-                        ? 'bg-[#1F1F21] text-white border-transparent shadow-lg font-black scale-95'
-                        : 'bg-white hover:bg-slate-50 border-slate-200/80 text-[#1F1F21]'
-                    }`}
-                  >
-                    <span>{dayObj.getDate()}</span>
-                    {isSystemToday && !isActiveSelection && (
-                      <span className="absolute bottom-2 w-2 h-2 bg-indigo-600 rounded-full shadow-sm" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-          </div>
-        </div>
-      )}
     </div>
   );
 }
