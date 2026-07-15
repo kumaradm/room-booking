@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { supabase } from '../supabaseClient';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import DatePicker from './DatePicker'; 
+import { useMsal } from "@azure/msal-react";
+// 1. Correctly using the static client instance to avoid multiple connection contexts
+import { supabase } from '../supabaseClient'; 
 
 export default function BookingPage({ roomId, renderHeader, goHome, onSuccess }) {
+  const { instance } = useMsal();
   const [title, setTitle] = useState('');
   const [selectedUserId, setSelectedUserId] = useState('');
   
@@ -34,10 +37,59 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   const [toastType, setToastType] = useState('success'); 
   const [toastMessage, setToastMessage] = useState('');
 
+  // States for corporate directories and room details
   const [usersList, setUsersList] = useState([]);
   const [allBookingsOnDate, setAllBookingsOnDate] = useState([]);
+  const [room, setRoom] = useState(null); // { id, name, email, capacity }
 
-  const parsedDatePickerObject = React.useMemo(() => {
+  // FETCH ROOM DETAILS FROM SUPABASE VIA UUID
+  useEffect(() => {
+    // Strict Guard Check: Prevent malformed database queries before UUID resolves
+    if (!roomId || roomId === 'undefined') {
+      return;
+    }
+
+    const fetchRoom = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('rooms')
+          .select('id, name, email, capacity')
+          .eq('id', roomId)
+          .single();
+
+        if (error) throw error;
+        if (data) setRoom(data);
+      } catch (err) {
+        console.error("Error loading room meta properties:", err);
+      }
+    };
+    
+    fetchRoom();
+  }, [roomId]);
+
+  // --- BACKGROUND SILENT TOKEN ACQUISITION ---
+  const getOutlookToken = async (customScopes = ["Calendars.ReadWrite", "User.Read"]) => {
+    const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
+    const request = {
+      scopes: customScopes,
+      account: account,
+    };
+
+    try {
+      const silentResponse = await instance.acquireTokenSilent(request);
+      return silentResponse.accessToken;
+    } catch (silentError) {
+      console.warn("Silent token acquisition failed, attempting fallback redirect...", silentError);
+      try {
+        await instance.acquireTokenRedirect(request);
+      } catch (redirectError) {
+        console.error("Microsoft redirect authentication request failed:", redirectError);
+      }
+      return null;
+    }
+  };
+
+  const parsedDatePickerObject = useMemo(() => {
     const [year, month, day] = date.split('-').map(Number);
     return new Date(year, month - 1, day);
   }, [date]);
@@ -49,29 +101,55 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     }
   }, [showToast]);
 
+  // Load verified team accounts
   useEffect(() => {
-    const fetchUsers = async () => {
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, full_name, email')
-        .order('full_name', { ascending: true });
-      if (!error && data) setUsersList(data);
-    };
-    fetchUsers();
+    const trustedPeople = [
+      { id: "1", full_name: "Your Name", email: "your-personal-email@outlook.com" },
+      { id: "2", full_name: "John Doe", email: "john.doe@gmail.com" },
+      { id: "3", full_name: "Jane Smith", email: "janesmith@yahoo.com" }
+    ];
+    setUsersList(trustedPeople);
   }, []);
 
+  // Fetch busy schedules directly from Graph API
   useEffect(() => {
+    if (!roomId || roomId === 'undefined') return;
+
     const fetchDaySchedule = async () => {
-      const { data, error } = await supabase
-        .from('bookings')
-        .select('room_id, booker_id, start_time, end_time')
-        .eq('booking_date', date);
-      if (!error && data) setAllBookingsOnDate(data);
+      const token = await getOutlookToken();
+      if (!token) return;
+
+      const targetDateStart = `${date}T00:00:00Z`;
+      const targetDateEnd = `${date}T23:59:59Z`;
+
+      try {
+        const response = await fetch(
+          `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${targetDateStart}&endDateTime=${targetDateEnd}`,
+          { headers: { "Authorization": `Bearer ${token}` } }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          const normalizedBookings = (data.value || []).map(event => {
+            const rawStart = event.start.dateTime.split('T')[1] || '';
+            const rawEnd = event.end.dateTime.split('T')[1] || '';
+            
+            return {
+              room_id: roomId, 
+              booker_id: event.organizer?.emailAddress?.address || '',
+              start_time: (rawStart.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0],
+              end_time: (rawEnd.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0]
+            };
+          });
+          setAllBookingsOnDate(normalizedBookings);
+        }
+      } catch (err) {
+        console.error("Error retrieving live timeline schedules:", err);
+      }
     };
     fetchDaySchedule();
-  }, [date]);
+  }, [date, roomId]);
 
-  // Handle clicking outside of custom dropdown menus to close them
+  // Outside Click closing listener
   useEffect(() => {
     function handleClickOutside(event) {
       if (startRef.current && !startRef.current.contains(event.target)) setIsStartOpen(false);
@@ -82,7 +160,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const generateTimeSlots = () => {
+  const timeSlots = useMemo(() => {
     const slots = [];
     for (let hour = 0; hour < 24; hour++) {
       for (let min = 0; min < 60; min += 30) {
@@ -92,9 +170,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
       }
     }
     return slots;
-  };
-
-  const timeSlots = generateTimeSlots();
+  }, []);
 
   const formatToAmPm = (timeStr) => {
     if (!timeStr) return '';
@@ -105,90 +181,176 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     return `${displayHour}:${minStr} ${ampm}`;
   };
 
-  const getFilteredStartTimes = () => {
+  // --- FILTERED TIMES (PREVENTS COLLISION) ---
+  const availableStartTimes = useMemo(() => {
     return timeSlots.filter(time => {
       const timeStr = `${time}:00`;
       const isRoomBusy = allBookingsOnDate.some(b => 
-        b.room_id === roomId && b.start_time <= timeStr && b.end_time > timeStr
+        timeStr >= b.start_time && timeStr < b.end_time
       );
-      const isUserBusy = selectedUserId && allBookingsOnDate.some(b => 
-        b.booker_id === selectedUserId && b.start_time <= timeStr && b.end_time > timeStr
-      );
-      return !isRoomBusy && !isUserBusy;
+      return !isRoomBusy;
     });
-  };
+  }, [timeSlots, allBookingsOnDate]);
 
-  const getFilteredEndTimes = () => {
+  const availableEndTimes = useMemo(() => {
     if (!startTime) return [];
     return timeSlots.filter(time => {
       if (time <= startTime) return false;
-      const targetEndTimeStr = `${time}:00`;
       const targetStartTimeStr = `${startTime}:00`;
+      const targetEndTimeStr = `${time}:00`;
 
-      const causesOverlappingCollision = allBookingsOnDate.some(b => {
-        const isConflictTarget = b.room_id === roomId || b.booker_id === selectedUserId;
-        return isConflictTarget && b.start_time >= targetStartTimeStr && b.start_time < targetEndTimeStr;
-      });
+      const causesOverlappingCollision = allBookingsOnDate.some(b => 
+        targetStartTimeStr < b.end_time && targetEndTimeStr > b.start_time
+      );
 
       return !causesOverlappingCollision;
     });
-  };
-
-  const availableStartTimes = getFilteredStartTimes();
-  const availableEndTimes = getFilteredEndTimes();
+  }, [startTime, timeSlots, allBookingsOnDate]);
 
   useEffect(() => {
     if (availableStartTimes.length && !availableStartTimes.includes(startTime)) {
       setStartTime(availableStartTimes[0]);
     }
-  }, [date, selectedUserId]);
+  }, [date, allBookingsOnDate, availableStartTimes]);
 
   useEffect(() => {
     if (availableEndTimes.length && !availableEndTimes.includes(endTime)) {
       setEndTime(availableEndTimes[0]);
     }
-  }, [startTime]);
+  }, [startTime, allBookingsOnDate, availableEndTimes]);
 
+  // --- SUBMIT RESERVATION WITH STRICT PRE-FLIGHT LOCK ---
   const handleBooking = async (e) => {
     if (e) e.preventDefault();
+    
+    if (!room) {
+      setToastType('error');
+      setToastMessage('Room data is still loading. Please try again.');
+      setShowToast(true);
+      return;
+    }
     if (!title || !selectedUserId || !startTime || !endTime) {
       setToastType('error');
-      setToastMessage('Please fill out all reservation parameters.');
+      setToastMessage('Please fill out all reservation fields.');
       setShowToast(true);
       return;
     }
 
     setIsSubmitting(true);
 
-    const { error } = await supabase
-      .from('bookings')
-      .insert([
-        {
-          room_id: roomId,
-          title: title,
-          booking_date: date,
-          start_time: `${startTime}:00`,
-          end_time: `${endTime}:00`,
-          is_private: isPrivate,
-          booker_id: selectedUserId
+    const outlookToken = await getOutlookToken();
+    if (!outlookToken) {
+      setIsSubmitting(false);
+      return;
+    }
+
+    const startDateTime = `${date}T${startTime}:00`;
+    const endDateTime = `${date}T${endTime}:00`;
+    const targetStartTimeStr = `${startTime}:00`;
+    const targetEndTimeStr = `${endTime}:00`;
+
+    try {
+      // 1. FORCED REAL-TIME CALENDAR VIEW FETCH (Double-Booking Guard)
+      const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const targetDateStart = `${date}T00:00:00`;
+      const targetDateEnd = `${date}T23:59:59`;
+      
+      const verifyRes = await fetch(
+        `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${targetDateStart}&endDateTime=${targetDateEnd}`,
+        { 
+          headers: { 
+            "Authorization": `Bearer ${outlookToken}`,
+            "Prefer": `outlook.timezone="${localTimezone}"`
+          } 
         }
-      ]);
+      );
 
-    setIsSubmitting(false);
+      if (!verifyRes.ok) {
+        throw new Error("Failed to verify real-time room availability.");
+      }
 
-    if (error) {
-      setToastType('error');
-      setToastMessage(`Allocation Error: ${error.message}`);
-      setShowToast(true);
-    } else {
+      const verifyData = await verifyRes.json();
+      
+      // Parse exactly what is currently on the server right this millisecond
+      const freshBookings = (verifyData.value || []).map(event => {
+        const rawStart = event.start.dateTime.split('T')[1] || '';
+        const rawEnd = event.end.dateTime.split('T')[1] || '';
+        return {
+          room_id: roomId,
+          booker_id: event.organizer?.emailAddress?.address || '',
+          start_time: (rawStart.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0],
+          end_time: (rawEnd.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0]
+        };
+      });
+
+      // 2. RUN COLLISION MATHEMATICS BEFORE CREATING REQUEST
+      const isNowDoubleBooked = freshBookings.some(b => 
+        targetStartTimeStr < b.end_time && targetEndTimeStr > b.start_time
+      );
+
+      // If a conflict exists, halt execution, update UI state so times look blocked, and warn user
+      if (isNowDoubleBooked) {
+        setAllBookingsOnDate(freshBookings); // Sync UI schedule instantly
+        setIsSubmitting(false);
+        
+        setToastType('error');
+        setToastMessage('Slot Unavailable! This time window was just reserved by another user.');
+        setShowToast(true);
+        return; // <--- CRITICAL: Hard stop. Form submission aborted.
+      }
+
+      // 3. NO CONFLICTS FOUND - SAFE TO COMMIT RESERVATION
+      const selectedUserObj = usersList.find(u => u.id === selectedUserId);
+      const dynamicTitle = title;
+
+      const outlookResponse = await fetch('https://graph.microsoft.com/v1.0/me/events', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${outlookToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          subject: dynamicTitle,
+          sensitivity: isPrivate ? "private" : "normal",
+          start: { dateTime: startDateTime, timeZone: localTimezone },
+          end: { dateTime: endDateTime, timeZone: localTimezone },
+          location: { displayName: room.name },
+          attendees: [
+            {
+              emailAddress: {
+                address: selectedUserObj?.email || '',
+                name: selectedUserObj?.full_name || ''
+              },
+              type: "required"
+            }
+          ]
+        })
+      });
+
+      if (!outlookResponse.ok) {
+        throw new Error("Calendar service rejected the reservation request.");
+      }
+
+      // 4. SUCCESS STATE REDIRECT
       setToastType('success');
-      setToastMessage('Room allocated successfully!');
+      setToastMessage('Room booked successfully!');
       setShowToast(true);
+      setIsSubmitting(false); 
       
       setTimeout(() => {
-        onSuccess();
-        goHome();
+        try {
+          if (typeof onSuccess === 'function') onSuccess();
+          if (typeof goHome === 'function') goHome();
+        } catch (callbackErr) {
+          console.error("Navigation error:", callbackErr);
+        }
       }, 1800);
+
+    } catch (err) {
+      setToastType('error');
+      setToastMessage(`Booking Failed: ${err.message}`);
+      setShowToast(true);
+      setIsSubmitting(false);
     }
   };
 
@@ -227,8 +389,8 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
         </div>
       </div>
 
-      {/* Top Content Layout */}
-      <div className="z-10 flex flex-col justify-start items-start h-full w-full gap-5 sm:gap-6 min-h-0 flex-1">
+      {/* Main Integrated Form Context Wrapper */}
+      <form onSubmit={handleBooking} className="z-10 flex flex-col justify-start items-start h-full w-full gap-5 sm:gap-6 min-h-0 flex-1">
         
         <div className="w-full text-left shrink-0">
           {renderHeader()}
@@ -236,7 +398,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
 
         <div className="flex items-center justify-between w-full gap-2">
           <h2 className="text-[1.35rem] sm:text-[1.7rem] lg:text-[2rem] font-semibold tracking-tight text-black">
-            Quick Book
+            Quick Book {room ? `— ${room.name}` : ''}
           </h2>
           <button 
             type="button"
@@ -252,7 +414,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
 
         {/* Main Platter Box */}
         <div className="bg-white backdrop-blur-xl border border-neutral-200/70 rounded-[2rem] overflow-visible shadow-[0_20px_50px_rgba(0,0,0,0.08)] w-full flex flex-col min-h-0 flex-1 p-6 sm:p-8 lg:p-10">
-          <form onSubmit={handleBooking} className="w-full flex flex-col justify-between h-full space-y-8 overflow-visible pr-1">
+          <div className="w-full flex flex-col justify-between h-full space-y-8 overflow-visible pr-1">
             <div className="space-y-7 sm:space-y-8 text-left">
               
               {/* Row 1: Title Input Row */}
@@ -306,7 +468,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
                   
                   <div className="relative flex flex-wrap items-center gap-3 mt-1">
                     
-                    {/* Start Time Apple Dropdown */}
+                    {/* Start Time Dropdown */}
                     <div className="relative min-w-[126px]" ref={startRef}>
                       <button
                         type="button"
@@ -338,7 +500,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
 
                     <span className="text-base font-semibold text-slate-400">-</span>
                     
-                    {/* End Time Apple Dropdown */}
+                    {/* End Time Dropdown */}
                     <div className="relative min-w-[126px]" ref={endRef}>
                       <button
                         type="button"
@@ -369,7 +531,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
                     </div>
 
                     <div className="relative">
-                      {/* DatePicker Menu Launcher Tag */}
+                      {/* DatePicker Launcher */}
                       <button
                         type="button"
                         onClick={() => setIsDatePickerOpen(prev => !prev)}
@@ -383,7 +545,6 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
                         </span>
                       </button>
 
-                      {/* Mounted Here: anchored directly under the date button */}
                       {isDatePickerOpen && (
                         <div className="absolute left-0 top-full mt-2 z-[60]">
                           <DatePicker 
@@ -400,7 +561,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
                 </div>
               </div>
 
-              {/* Row 3: Organizer Selection Apple Dropdown */}
+              {/* Row 3: Organizer Selection Dropdown */}
               <div className="flex items-start gap-4 w-full">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="size-7 text-slate-400 shrink-0 mt-2">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
@@ -442,28 +603,27 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
               </div>
 
             </div>
-          </form>
+          </div>
         </div>
-      </div>
 
-      {/* Action Footer Platter Controls */}
-      <div className="w-full pt-4 mt-4 shrink-0 flex justify-end items-center z-10 px-0">
-        <button 
-          type="button"
-          onClick={() => handleBooking()}
-          disabled={isSubmitting || !availableStartTimes.length}
-          className="bg-[#007AFF] hover:bg-[#0066CC] active:scale-[0.98] text-white font-medium px-12 py-2.5 rounded-[2rem] text-[15px] sm:text-[20px] tracking-tight transition-all duration-200 disabled:opacity-30 disabled:pointer-events-none shadow-sm flex items-center gap-2"
-        >
-          {isSubmitting && (
-            <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-          )}
-          <span>{isSubmitting ? 'Booking...' : 'Book'}</span>
-        </button>
-      </div>
+        {/* Action Footer Button Integrated Into Form Context */}
+        <div className="w-full pt-4 mt-4 shrink-0 flex justify-end items-center z-10 px-0">
+          <button 
+            type="submit"
+            disabled={isSubmitting || !availableStartTimes.length}
+            className="bg-[#007AFF] hover:bg-[#0066CC] active:scale-[0.98] text-white font-medium px-12 py-2.5 rounded-[2rem] text-[15px] sm:text-[20px] tracking-tight transition-all duration-200 disabled:opacity-30 disabled:pointer-events-none shadow-sm flex items-center gap-2"
+          >
+            {isSubmitting && (
+              <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            )}
+            <span>{isSubmitting ? 'Booking...' : 'Book'}</span>
+          </button>
+        </div>
 
+      </form>
     </div>
   );
 }

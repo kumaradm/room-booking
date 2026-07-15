@@ -1,69 +1,84 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useMsal, useIsAuthenticated, MsalProvider } from "@azure/msal-react"; 
+import { PublicClientApplication, InteractionStatus } from "@azure/msal-browser";
 import Clock from './components/Clock';
 import SchedulePage from './components/SchedulePage';
 import BookingPage from './components/BookingPage';
 import OccupancySensor from './components/OccupancySensor';
 import { supabase } from './supabaseClient';
 
-// --- MOCK DATA INITIALIZATION ---
-// const MOCK_ROOM = {
-//   id: 'room-123',
-//   room_name: 'Gee Room',
-//   capacity: 8,
-//   is_occupied: false
-// };
+const msalConfig = {
+  auth: {
+    clientId: "10126d5f-6b01-491d-9eb1-2d1b27298605",
+    authority: "https://login.microsoftonline.com/common",
+    redirectUri: window.location.origin,
+  },
+  cache: {
+    cacheLocation: "localStorage",
+    storeAuthStateInCookie: true,
+  }
+};
 
-// const generateMockBookings = () => {
-//   const today = new Date().toISOString().split('T')[0];
-//   const formatTimeStr = (dateObj) => dateObj.toTimeString().split(' ')[0];
+const msalInstance = new PublicClientApplication(msalConfig);
 
-//   const activeStart = new Date();
-//   activeStart.setMinutes(activeStart.getMinutes() + 32); 
-//   const activeEnd = new Date();
-//   activeEnd.setMinutes(activeEnd.getMinutes() + 30);
+// --- INNER APP LOGIC (Consumes MSAL Context Safely) ---
+function AppContent({ isMsalInitialized }) {
+  const { instance, inProgress } = useMsal();
+  const isAuthenticated = useIsAuthenticated();
 
-//   const nextStart = new Date();
-//   nextStart.setMinutes(nextStart.getMinutes() + 45);
-//   const nextEnd = new Date();
-//   nextEnd.setMinutes(nextEnd.getMinutes() + 90);
-
-//   return [
-//     {
-//       id: 'booking-001',
-//       room_id: 'room-123',
-//       booking_date: today,
-//       start_time: formatTimeStr(activeStart),
-//       end_time: formatTimeStr(activeEnd),
-//       title: 'Q3 Product Strategy Sync',
-//       is_private: false,
-//       users: { full_name: 'Sarah Jenkins', email: 'sarah@company.com' }
-//     },
-//     {
-//       id: 'booking-002',
-//       room_id: 'room-123',
-//       booking_date: today,
-//       start_time: formatTimeStr(nextStart),
-//       end_time: formatTimeStr(nextEnd),
-//       title: 'Dev Team Standup & Backlog Grooming',
-//       is_private: false,
-//       users: { full_name: 'Alex Rivera', email: 'alex@company.com' }
-//     }
-//   ];
-// };
-// ---------------------------------
-
-function App() {
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [room, setRoom] = useState(null);
-  const [bookings, setBookings] = useState([]);
+  const [bookings, setBookings] = useState([]); 
   const [isPersonDetected, setIsPersonDetected] = useState(false);
   const [hasCheckedIn, setHasCheckedIn] = useState(false); 
   const [currentTime, setCurrentTime] = useState(new Date());
   const [showToast, setShowToast] = useState(false);
+  const [isAuthResolving, setIsAuthResolving] = useState(true);
+
+  // Extend Page State
+  const [extendHours, setExtendHours] = useState(0);
+  const [extendMinutes, setExtendMinutes] = useState(15);
+  const [isExtending, setIsExtending] = useState(false);
 
   const emptyMinutesRef = useRef(0);
   const lastActiveMeetingIdRef = useRef(null);
   const lastMinuteRef = useRef('');
+
+  // Get token helper for Graph API calls
+  const getOutlookToken = async () => {
+    const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
+    const request = {
+      scopes: ["Calendars.ReadWrite", "User.Read"],
+      account: account,
+    };
+    try {
+      const response = await instance.acquireTokenSilent(request);
+      return response.accessToken;
+    } catch (err) {
+      console.warn("Silent token fallback routing active...", err);
+      return null;
+    }
+  };
+
+  // --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
+  useEffect(() => {
+    if (!isMsalInitialized) return;
+    if (inProgress !== InteractionStatus.None) return;
+    
+    const accounts = instance.getAllAccounts();
+    if (!isAuthenticated && accounts.length === 0) {
+      instance.loginRedirect({
+        scopes: ["Calendars.ReadWrite", "User.Read"]
+      }).catch(err => {
+        console.error("Redirect login failed to initiate:", err);
+      });
+    } else {
+      if (!instance.getActiveAccount() && accounts.length > 0) {
+        instance.setActiveAccount(accounts[0]);
+      }
+      setIsAuthResolving(false);
+    }
+  }, [instance, isMsalInitialized, inProgress, isAuthenticated]);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -92,6 +107,100 @@ function App() {
     };
   }, [currentTime]);
 
+  // --- AUTOMATIC TIME-BASED BREAK CALCULATION (3:00 PM - 3:30 PM) ---
+  const isBreakActive = useMemo(() => {
+    const nowMinutes = timeToMinutes(timeStrings.timeStr);
+    const breakStart = 15 * 60;     // 3:00 PM
+    const breakEnd = 15 * 60 + 30;  // 3:30 PM
+    return nowMinutes >= breakStart && nowMinutes < breakEnd;
+  }, [timeStrings.timeStr]);
+
+  // --- OUTLOOK DYNAMIC EVENT FETCHING AND NORMALIZATION ---
+  const fetchBookings = useCallback(async () => {
+    if (!room?.email) return; 
+    const token = await getOutlookToken();
+    if (!token) return;
+
+    const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const today = new Date(currentTime);
+    
+    const startLocal = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0);
+    const endLocal = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+
+    const pad = (num) => String(num).padStart(2, '0');
+    
+    const formatLocalISO = (d) => 
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
+    const startStr = formatLocalISO(startLocal);
+    const endStr = formatLocalISO(endLocal);
+
+    try {
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${startStr}&endDateTime=${endStr}&$orderby=start/dateTime`,
+        {
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Prefer": `outlook.timezone="${localTimezone}"`
+          }
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        
+        const normalized = (data.value || []).map(event => {
+          const rawStart = event.start.dateTime.split('T')[1] || '';
+          const rawEnd = event.end.dateTime.split('T')[1] || '';
+          
+          return {
+            id: event.id,
+            booking_date: event.start.dateTime.split('T')[0],
+            start_time: rawStart.substring(0, 5), 
+            end_time: rawEnd.substring(0, 5),   
+            title: event.subject || 'No Title',
+            is_private: event.sensitivity === 'private',
+            users: {
+              full_name: event.organizer?.emailAddress?.name || 'Organizer'
+            }
+          };
+        });
+
+        setBookings(normalized);
+      }
+    } catch (error) {
+      console.error("Error synchronization with live Outlook graph records:", error);
+    }
+  }, [room?.email, currentTime]);
+
+  // Read Static data from Supabase Directory
+  useEffect(() => {
+    const fetchRoomData = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('rooms')
+          .select('*')
+          .eq('name', 'Gee Room')
+          .single();
+
+        if (error) throw error;
+        setRoom(data);
+      } catch (error) {
+        console.error("Error fetching static directory from Supabase rooms layout:", error.message);
+      }
+    };
+    fetchRoomData();
+  }, []);
+
+  useEffect(() => {
+    if (room?.email) {
+      fetchBookings();
+      const pollInterval = setInterval(fetchBookings, 30000);
+      return () => clearInterval(pollInterval);
+    }
+  }, [room?.email, fetchBookings]);
+
+  // --- KIOSK STATE LOGIC MATCHES LIVE ARRAY HOOKS ---
   const kioskState = useMemo(() => {
     const nowMinutes = timeToMinutes(timeStrings.timeStr);
 
@@ -113,6 +222,27 @@ function App() {
       
       const displayHrs = Math.floor(diffMins / 60).toString().padStart(2, '0');
       const displayMins = (diffMins % 60).toString().padStart(2, '0');
+
+      if (isBreakActive) {
+        return {
+          meetingToDisplay: active,
+          activeMeeting: active,
+          status: {
+            text: "BREAK",
+            bgStyle: "from-[#007AFF] to-[#002D6C]", 
+            textSize: "md:text-[8rem] xl:text-[9.5rem]",
+            subtext: "",
+            countdown: { 
+              label: "Break ends when meeting ends in", 
+              primary: displayHrs, 
+              primaryLabel: "Hours", 
+              secondary: displayMins, 
+              secondaryLabel: "Minutes",
+              highlightSecondary: false
+            }
+          }
+        };
+      }
 
       return {
         meetingToDisplay: active, 
@@ -178,7 +308,7 @@ function App() {
         textSize: "md:text-[8rem] xl:text-[9.5rem]"
       }
     };
-  }, [bookings, timeStrings, currentTime]);
+  }, [bookings, timeStrings, currentTime, isBreakActive]);
 
   const currentStatus = kioskState.status;
   const meetingToDisplay = kioskState.meetingToDisplay;
@@ -194,6 +324,16 @@ function App() {
     return (nowMins >= startMins - 5) && (nowMins <= startMins + 10);
   }, [currentTargetMeeting, timeStrings.timeStr]);
 
+  // Determine if the "IN USE" meeting is in its last 5 minutes
+  const isLastFiveMinutes = useMemo(() => {
+    if (currentStatus?.text !== "IN USE" || !activeMeeting) return false;
+    const nowMins = timeToMinutes(timeStrings.timeStr);
+    const endMins = timeToMinutes(activeMeeting.end_time);
+    const remaining = endMins - nowMins;
+    return remaining > 0 && remaining <= 5;
+  }, [currentStatus, activeMeeting, timeStrings.timeStr]);
+
+  // Handle auto-reset of details if the meeting finishes or swaps
   useEffect(() => {
     if (currentTargetMeeting?.id !== lastActiveMeetingIdRef.current) {
       lastActiveMeetingIdRef.current = currentTargetMeeting?.id || null;
@@ -209,21 +349,82 @@ function App() {
     }
   }, [isPersonDetected, isWithinCheckInWindow]);
 
+  // --- LIVE OUTLOOK RESCISSION OF GHOST MEETINGS ---
   const handleCancelGhostMeeting = useCallback(async (meetingId) => {
-    // --- MOCK CANCEL GHOST MEETING ---
-    // console.warn(`[MOCK] Ghost reservation detected (${meetingId}). No occupancy found. Cancelling.`);
-    // setBookings(prev => prev.filter(b => b.id !== meetingId));
-    // setHasCheckedIn(false);
+    console.warn(`Meeting ended or ghost detected (${meetingId}). Cleaning up calendar.`);
+    const token = await getOutlookToken();
+    if (!token) return;
 
-    // --- SUPABASE CANCEL GHOST MEETING ---
-    console.warn(`Ghost reservation detected (${meetingId}). No occupancy found. Cancelling.`);
-    await supabase.from('bookings').delete().eq('id', meetingId);
-    setBookings(prev => prev.filter(b => b.id !== meetingId));
-    setHasCheckedIn(false);
+    try {
+      const response = await fetch(`https://graph.microsoft.com/v1.0/me/events/${meetingId}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        setBookings(prev => prev.filter(b => b.id !== meetingId));
+        setHasCheckedIn(false);
+      }
+    } catch (error) {
+      console.error("Failed executing ghost cancellation callback against Graph framework:", error);
+    }
   }, []);
 
+  // --- OUTLOOK EVENT PATCH (EXTEND MEETING FUNCTION) ---
+  const handleExtendMeeting = async () => {
+    if (!activeMeeting) return;
+    setIsExtending(true);
+
+    const token = await getOutlookToken();
+    if (!token) {
+      setIsExtending(false);
+      return;
+    }
+
+    try {
+      const addedMinutes = extendHours * 60 + extendMinutes;
+      const currentEndMinutes = timeToMinutes(activeMeeting.end_time);
+      const targetEndMinutes = currentEndMinutes + addedMinutes;
+
+      const updatedEndH = Math.floor(targetEndMinutes / 60);
+      const updatedEndM = targetEndMinutes % 60;
+      const targetEndTimeStr = `${String(updatedEndH).padStart(2, '0')}:${String(updatedEndM).padStart(2, '0')}:00`;
+
+      const targetEndDateTimeLocal = `${activeMeeting.booking_date}T${targetEndTimeStr}`;
+
+      const response = await fetch(`https://graph.microsoft.com/v1.0/me/events/${activeMeeting.id}`, {
+        method: "PATCH",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          end: {
+            dateTime: targetEndDateTimeLocal,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          }
+        })
+      });
+
+      if (response.ok) {
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 3000);
+        await fetchBookings();
+        setCurrentPage('dashboard');
+      } else {
+        const errorDetails = await response.json();
+        console.error("Failed to patch Outlook event extending session timeline:", errorDetails);
+      }
+    } catch (error) {
+      console.error("Failed to make target dynamic calendar changes on Graph layer:", error);
+    } finally {
+      setIsExtending(false);
+    }
+  };
+
+  // --- OCCUPANCY SENSOR WATCHDOG (Bypassed automatically on BREAK) ---
   useEffect(() => {
-    if (!currentTargetMeeting) {
+    if (!currentTargetMeeting || isBreakActive) { 
       emptyMinutesRef.current = 0;
       return;
     }
@@ -256,10 +457,10 @@ function App() {
         emptyMinutesRef.current = 0; 
       }
     }
-  }, [currentTime, isPersonDetected, currentTargetMeeting, hasCheckedIn, timeStrings.timeStr, handleCancelGhostMeeting]);
+  }, [currentTime, isPersonDetected, currentTargetMeeting, hasCheckedIn, isBreakActive, timeStrings.timeStr, handleCancelGhostMeeting]);
 
   const showCheckInButton = isWithinCheckInWindow && !hasCheckedIn;
-  const showRoomWarning = currentTargetMeeting && !isPersonDetected && (emptyMinutesRef.current > 0 || showCheckInButton);
+  const showRoomWarning = currentTargetMeeting && !isPersonDetected && (emptyMinutesRef.current > 0 || showCheckInButton) && !isBreakActive;
 
   const warningLabelText = useMemo(() => {
     if (!showRoomWarning) return "";
@@ -273,7 +474,6 @@ function App() {
       if (minutesLeftToCheckIn === 0) {
         return `Please check in within less than a minute to save your booking!`;
       }
-
       return `Please check in within ${minutesLeftToCheckIn} ${minutesLeftToCheckIn === 1 ? 'minute' : 'minutes'} to save your booking.`;
     }
 
@@ -281,64 +481,12 @@ function App() {
     return `Room is empty. Auto-vacating in ${remaining} ${remaining === 1 ? 'minute' : 'minutes'}.`;
   }, [showRoomWarning, showCheckInButton, timeStrings.timeStr, currentTargetMeeting]);
 
-  const fetchBookings = useCallback(async () => {
-    if (!room?.id) return;
-    // --- MOCK FETCH BOOKINGS ---
-    // console.log("[MOCK] Fetching bookings list");
-    // setBookings(generateMockBookings());
-
-    // --- SUPABASE FETCH BOOKINGS ---
-    try {
-      const { data, error } = await supabase
-        .from('bookings')
-        .select('*, users(full_name, email)')
-        .eq('room_id', room.id)
-        .order('booking_date', { ascending: true })
-        .order('start_time', { ascending: true });
-      if (error) throw error;
-      setBookings(data);
-    } catch (error) {
-      console.error("Error fetching bookings:", error.message);
-    }
-  }, [room?.id]);
-
-  useEffect(() => {
-    const fetchRoomData = async () => {
-      try{
-        // --- MOCK FETCH ROOM DATA ---
-        // console.log("[MOCK] Fetching room metadata setup profile");
-        // setRoom(MOCK_ROOM);
-
-        // --- SUPABASE FETCH ROOM DATA ---
-        const { data, error } = await supabase
-          .from('rooms')
-          .select('*')
-          .eq('room_name', 'Gee Room')
-          .single();
-
-        if (error) throw error;
-        setRoom(data);
-      } catch (error) {
-        console.error("Error fetching room data:", error.message);
-      }
-    };
-    fetchRoomData();
-  }, []);
-
-  useEffect(() => {
-    if (room?.id) {
-      fetchBookings();
-    }
-  }, [room?.id, fetchBookings]);
-
   const handleCheckIn = async () => {
     setHasCheckedIn(true);
     setShowToast(true);
     setTimeout(() => setShowToast(false), 3000);
 
     if (room?.id) {
-      // --- MOCK CHECK-IN ACTION ---
-      // console.log(`[MOCK] Room '${room.id}' status set to occupied.`);
       try {
         await supabase
           .from('rooms')
@@ -466,7 +614,7 @@ function App() {
       <div className={`flex flex-row justify-between items-center z-10 shrink-0 ${bgWrapperClass}`}>
         <div className="min-w-0">
           <h1 className={`text-3xl md:text-5xl font-bold tracking-tight truncate ${titleColor}`}>
-            {room?.room_name || "Loading..."}
+            {room?.name || "Loading..."}
           </h1>
           <p className={`text-lg md:text-3xl font-light flex items-center gap-3 mt-1.5 ${subtitleColor}`}>
             <svg 
@@ -489,12 +637,24 @@ function App() {
     );
   };
 
+  if (isAuthResolving || !isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-500 font-mono text-lg tracking-widest gap-4">
+        <svg className="animate-spin h-8 w-8 text-white/50" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span>CONNECTING TO OUTLOOK...</span>
+      </div>
+    );
+  }
+
   if (!room) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 font-mono text-lg tracking-widest">LOADING...</div>;
 
   if (currentPage === 'schedule') {
     return (
       <SchedulePage 
-        bookings={bookings} 
+        roomEmail={room.email} 
         renderHeader={() => renderHeader('black')} 
         goHome={() => setCurrentPage('dashboard')} 
       />
@@ -504,11 +664,107 @@ function App() {
   if (currentPage === 'booking') {
     return (
       <BookingPage 
-        roomId={room.id} 
+        roomId={room.id}
         renderHeader={() => renderHeader('black')} 
         goHome={() => setCurrentPage('dashboard')} 
         onSuccess={fetchBookings} 
       />
+    );
+  }
+
+  // --- EXTEND MEETING PAGE (Shares booking page styling) ---
+  if (currentPage === 'extend') {
+    return (
+      <div className="min-h-screen w-full bg-[#f8fafc] text-slate-900 p-6 md:p-10 flex flex-col justify-between font-sans relative">
+        <div className="flex flex-col gap-8 w-full max-w-7xl mx-auto flex-1">
+          {renderHeader('black')}
+
+          <div className="flex flex-col gap-4 mt-4 animate-fade-in">
+            <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900">
+              Extend Active Meeting
+            </h2>
+            <p className="text-lg text-slate-500 max-w-xl">
+              Specify the extra duration you want to append to this current block.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center justify-center flex-1 py-4 max-w-4xl mx-auto w-full">
+            {/* Hours Counter Component */}
+            <div className="bg-white border border-slate-200 rounded-3xl p-8 flex flex-col items-center justify-center shadow-lg gap-6">
+              <span className="text-sm font-semibold tracking-wider text-slate-400 uppercase">Hours</span>
+              <div className="flex flex-col items-center gap-4 w-full">
+                <button 
+                  onClick={() => setExtendHours(prev => Math.min(prev + 1, 12))}
+                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+                  </svg>
+                </button>
+                <span className="text-6xl md:text-8xl font-black text-slate-800 tabular-nums">
+                  {extendHours}
+                </span>
+                <button 
+                  onClick={() => setExtendHours(prev => Math.max(prev - 1, 0))}
+                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Minutes Counter Component */}
+            <div className="bg-white border border-slate-200 rounded-3xl p-8 flex flex-col items-center justify-center shadow-lg gap-6">
+              <span className="text-sm font-semibold tracking-wider text-slate-400 uppercase">Minutes</span>
+              <div className="flex flex-col items-center gap-4 w-full">
+                <button 
+                  onClick={() => setExtendMinutes(prev => (prev >= 45 ? 0 : prev + 15))}
+                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+                  </svg>
+                </button>
+                <span className="text-6xl md:text-8xl font-black text-slate-800 tabular-nums">
+                  {String(extendMinutes).padStart(2, '0')}
+                </span>
+                <button 
+                  onClick={() => setExtendMinutes(prev => (prev <= 0 ? 45 : prev - 15))}
+                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Action Footer */}
+        <div className="w-full max-w-7xl mx-auto mt-8 border-t border-slate-200 pt-6 flex flex-row justify-between items-center">
+          <button 
+            onClick={() => {
+              setExtendHours(0);
+              setExtendMinutes(15);
+              setCurrentPage('dashboard');
+            }}
+            className="px-8 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-all"
+          >
+            Cancel
+          </button>
+
+          <button 
+            onClick={handleExtendMeeting}
+            disabled={isExtending || (extendHours === 0 && extendMinutes === 0)}
+            className="px-10 py-4 bg-[#007AFF] hover:bg-[#0051C3] disabled:opacity-50 text-white font-bold rounded-2xl shadow-lg transition-all flex items-center gap-3"
+          >
+            {isExtending ? 'Extending...' : 'Extend'}
+          </button>
+        </div>
+      </div>
     );
   }
 
@@ -521,7 +777,7 @@ function App() {
               <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
             </svg>
           </div>
-          <span className="text-white text-lg font-semibold tracking-tight">Check-in Successful</span>
+          <span className="text-white text-lg font-semibold tracking-tight">Meeting Updated Successfully</span>
         </div>
       </div>
 
@@ -538,9 +794,11 @@ function App() {
           {meetingToDisplay ? renderUpcomingMeetingCard() : renderEmptyMeetingCard()}
         </div>
 
+        {/* --- BOTTOM CONTROLS FOOTER --- */}
         <div className="w-full pt-4 pb-2 shrink-0 overflow-visible relative">
           <div className="flex flex-row justify-between items-center w-full gap-6">
             
+            {/* LEFT COMPONENT SLOT */}
             {currentStatus.text === "AVAILABLE" ? (
               <button 
                 onClick={() => setCurrentPage('schedule')}
@@ -551,10 +809,22 @@ function App() {
                 </svg>
                 <span className="text-lg md:text-2xl font-light text-white">Meeting's Schedule</span>
               </button>
+            ) : currentStatus.text === "BREAK" ? (
+              // BREAK STATE LEFT BUTTON -> END MEETING EARLY
+              <button 
+                onClick={() => handleCancelGhostMeeting(activeMeeting?.id)}
+                className={`${scheduleButtonClass} border-red-500/30 hover:border-red-500/60 bg-red-500/10 hover:bg-red-500/20`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-red-400">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                </svg>
+                <span className="text-lg md:text-2xl font-semibold text-red-200">End Meeting Early</span>
+              </button>
             ) : (
               <div className="w-56 md:w-80 hidden md:block pointer-events-none" />
             )}
 
+            {/* MIDDLE WARNING BANNER (Hidden during breaks) */}
             {showRoomWarning && (
               <div className="absolute left-1/2 -translate-x-1/2 flex flex-row items-center gap-3 text-amber-400 font-medium max-w-[45%] text-center justify-center pointer-events-none animate-fade-in px-4 z-10">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-6 shrink-0 animate-pulse">
@@ -566,7 +836,10 @@ function App() {
               </div>
             )}
 
-            {showCheckInButton ? (
+            {/* RIGHT COMPONENT SLOT */}
+            {currentStatus.text === "BREAK" ? (
+              <div className="w-56 md:w-80 h-16 md:h-20 ml-auto pointer-events-none" />
+            ) : showCheckInButton ? (
               <button 
                 onClick={handleCheckIn}
                 className={`${actionButtonClass} ml-auto`}
@@ -575,6 +848,17 @@ function App() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
                 </svg>
                 <span className="text-lg md:text-2xl font-black text-amber-300 uppercase">Check In</span>
+              </button>
+            ) : isLastFiveMinutes ? (
+              // --- DYNAMIC "EXTEND MEETING" BUTTON TRIGGER ---
+              <button 
+                onClick={() => setCurrentPage('extend')}
+                className={`${actionButtonClass} ml-auto border-emerald-500/30 hover:border-emerald-500/60 bg-emerald-500/10 hover:bg-emerald-500/20`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-7 text-emerald-400">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                </svg>
+                <span className="text-lg md:text-2xl font-bold text-emerald-300">Extend Meeting</span>
               </button>
             ) : currentStatus.text !== "AVAILABLE" ? (
               <div className="w-56 md:w-80 h-16 md:h-20 ml-auto" />
@@ -598,4 +882,31 @@ function App() {
   );
 }
 
-export default App;
+// --- OUTER WRAPPER ---
+export default function App() {
+  const [isMsalInitialized, setIsMsalInitialized] = useState(false);
+
+  useEffect(() => {
+    msalInstance.initialize()
+      .then(() => {
+        setIsMsalInitialized(true);
+      })
+      .catch((err) => {
+        console.error("Critical failure initializing MSAL framework:", err);
+      });
+  }, []);
+
+  if (!isMsalInitialized) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-500 font-mono text-lg tracking-widest gap-4">
+        <div className="animate-pulse">INITIALIZING AUTHENTICATION SYSTEM...</div>
+      </div>
+    );
+  }
+
+  return (
+    <MsalProvider instance={msalInstance}>
+      <AppContent isMsalInitialized={isMsalInitialized} />
+    </MsalProvider>
+  );
+}
