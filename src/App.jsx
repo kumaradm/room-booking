@@ -60,25 +60,36 @@ function AppContent({ isMsalInitialized }) {
     }
   };
 
-  // --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
-  useEffect(() => {
-    if (!isMsalInitialized) return;
-    if (inProgress !== InteractionStatus.None) return;
-    
-    const accounts = instance.getAllAccounts();
-    if (!isAuthenticated && accounts.length === 0) {
-      instance.loginRedirect({
-        scopes: ["Calendars.ReadWrite", "User.Read"]
-      }).catch(err => {
-        console.error("Redirect login failed to initiate:", err);
-      });
-    } else {
-      if (!instance.getActiveAccount() && accounts.length > 0) {
-        instance.setActiveAccount(accounts[0]);
-      }
-      setIsAuthResolving(false);
+// --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
+useEffect(() => {
+  if (!isMsalInitialized) return;
+  
+  // 1. If MSAL is currently processing a redirect or token, freeze and wait.
+  if (inProgress !== InteractionStatus.None) return;
+  
+  const accounts = instance.getAllAccounts();
+
+  // 2. SAFETY CHECK: If accounts exist, but isAuthenticated is briefly false 
+  // during state transitions, DO NOT redirect! Just wait for MSAL to catch up.
+  if (accounts.length > 0) {
+    if (!instance.getActiveAccount()) {
+      instance.setActiveAccount(accounts[0]);
     }
-  }, [instance, isMsalInitialized, inProgress, isAuthenticated]);
+    setIsAuthResolving(false);
+    return; // Stop here, do not trigger a login redirect!
+  }
+
+  // 3. Only redirect if there are absolutely no accounts found and we aren't authenticated.
+  if (!isAuthenticated && accounts.length === 0) {
+    instance.loginRedirect({
+      scopes: ["Calendars.ReadWrite", "User.Read"]
+    }).catch(err => {
+      console.error("Redirect login failed to initiate:", err);
+    });
+  } else {
+    setIsAuthResolving(false);
+  }
+}, [instance, isMsalInitialized, inProgress, isAuthenticated]);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -103,7 +114,11 @@ function AppContent({ isMsalInitialized }) {
   const timeStrings = useMemo(() => {
     return {
       timeStr: currentTime.toTimeString().split(' ')[0],
-      dateStr: currentTime.toISOString().split('T')[0]
+      dateStr: (() => {
+  const d = currentTime;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+})()
     };
   }, [currentTime]);
 
@@ -137,7 +152,7 @@ function AppContent({ isMsalInitialized }) {
 
     try {
       const response = await fetch(
-        `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${startStr}&endDateTime=${endStr}&$orderby=start/dateTime`,
+        `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${startStr}&endDateTime=${endStr}&$orderby=start/dateTime`,
         {
           headers: {
             "Authorization": `Bearer ${token}`,
@@ -149,22 +164,42 @@ function AppContent({ isMsalInitialized }) {
       if (response.ok) {
         const data = await response.json();
         
-        const normalized = (data.value || []).map(event => {
-          const rawStart = event.start.dateTime.split('T')[1] || '';
-          const rawEnd = event.end.dateTime.split('T')[1] || '';
-          
-          return {
-            id: event.id,
-            booking_date: event.start.dateTime.split('T')[0],
-            start_time: rawStart.substring(0, 5), 
-            end_time: rawEnd.substring(0, 5),   
-            title: event.subject || 'No Title',
-            is_private: event.sensitivity === 'private',
-            users: {
-              full_name: event.organizer?.emailAddress?.name || 'Organizer'
-            }
-          };
-        });
+const normalized = (data.value || [])
+  .map(event => {
+    const rawStart = event.start.dateTime.split('T')[1] || '';
+    const rawEnd = event.end.dateTime.split('T')[1] || '';
+    const requiredAttendees = (event.attendees || []).filter(a => a.type === 'required');
+    const attendeeNames = requiredAttendees
+      .map(a => a.emailAddress?.name || a.emailAddress?.address)
+      .filter(Boolean)
+      .join(', ');
+    const displayName = attendeeNames
+      || event.organizer?.emailAddress?.name
+      || event.organizer?.emailAddress?.address
+      || 'Unknown';
+
+    return {
+      id: event.id,
+      booking_date: event.start.dateTime.split('T')[0],
+      start_time: rawStart.substring(0, 5),
+      end_time: rawEnd.substring(0, 5),
+      title: event.subject || 'No Title',
+      is_private: event.sensitivity === 'private',
+      users: { full_name: displayName }
+    };
+  })
+  // Only keep events belonging to today's local date
+  .filter(b => {
+    const pad = (n) => String(n).padStart(2, '0');
+    const today = new Date(currentTime);
+    const localDate = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    return b.booking_date === localDate;
+  })
+  .sort((a, b) => {
+    const [aH, aM] = a.start_time.split(':').map(Number);
+    const [bH, bM] = b.start_time.split(':').map(Number);
+    return (aH * 60 + aM) - (bH * 60 + bM);
+  });
 
         setBookings(normalized);
       }

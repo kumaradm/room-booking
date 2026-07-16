@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import DatePicker from './DatePicker'; 
 import { useMsal } from "@azure/msal-react";
-// 1. Correctly using the static client instance to avoid multiple connection contexts
 import { supabase } from '../supabaseClient'; 
 
 export default function BookingPage({ roomId, renderHeader, goHome, onSuccess }) {
@@ -40,14 +39,11 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   // States for corporate directories and room details
   const [usersList, setUsersList] = useState([]);
   const [allBookingsOnDate, setAllBookingsOnDate] = useState([]);
-  const [room, setRoom] = useState(null); // { id, name, email, capacity }
+  const [room, setRoom] = useState(null);
 
   // FETCH ROOM DETAILS FROM SUPABASE VIA UUID
   useEffect(() => {
-    // Strict Guard Check: Prevent malformed database queries before UUID resolves
-    if (!roomId || roomId === 'undefined') {
-      return;
-    }
+    if (!roomId || roomId === 'undefined') return;
 
     const fetchRoom = async () => {
       try {
@@ -68,7 +64,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   }, [roomId]);
 
   // --- BACKGROUND SILENT TOKEN ACQUISITION ---
-  const getOutlookToken = async (customScopes = ["Calendars.ReadWrite", "User.Read"]) => {
+  const getOutlookToken = async (customScopes = ["Calendars.ReadWrite", "Calendars.Read.Shared", "User.Read"]) => {
     const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
     const request = {
       scopes: customScopes,
@@ -111,43 +107,72 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     setUsersList(trustedPeople);
   }, []);
 
-  // Fetch busy schedules directly from Graph API
-  useEffect(() => {
-    if (!roomId || roomId === 'undefined') return;
+  // Fetch busy schedule directly for the selected room via getSchedule API
+  const fetchRoomScheduleForDate = async (targetRoomEmail, targetDateStr) => {
+    const token = await getOutlookToken();
+    if (!token || !targetRoomEmail) return [];
 
-    const fetchDaySchedule = async () => {
-      const token = await getOutlookToken();
-      if (!token) return;
+    const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-      const targetDateStart = `${date}T00:00:00Z`;
-      const targetDateEnd = `${date}T23:59:59Z`;
+    // Build start and end dates in ISO format for the full day
+    const startIso = `${targetDateStr}T00:00:00`;
+    const endIso = `${targetDateStr}T23:59:59`;
 
-      try {
-        const response = await fetch(
-          `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${targetDateStart}&endDateTime=${targetDateEnd}`,
-          { headers: { "Authorization": `Bearer ${token}` } }
-        );
-        if (response.ok) {
-          const data = await response.json();
-          const normalizedBookings = (data.value || []).map(event => {
-            const rawStart = event.start.dateTime.split('T')[1] || '';
-            const rawEnd = event.end.dateTime.split('T')[1] || '';
-            
-            return {
-              room_id: roomId, 
-              booker_id: event.organizer?.emailAddress?.address || '',
-              start_time: (rawStart.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0],
-              end_time: (rawEnd.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0]
-            };
-          });
-          setAllBookingsOnDate(normalizedBookings);
-        }
-      } catch (err) {
-        console.error("Error retrieving live timeline schedules:", err);
+    try {
+      const response = await fetch("https://graph.microsoft.com/v1.0/me/calendar/getSchedule", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "Prefer": `outlook.timezone="${localTimezone}"`
+        },
+        body: JSON.stringify({
+          schedules: [targetRoomEmail],
+          startTime: { dateTime: startIso, timeZone: localTimezone },
+          endTime: { dateTime: endIso, timeZone: localTimezone },
+          availabilityViewInterval: 15
+        })
+      });
+
+      if (!response.ok) {
+        console.error("Failed to fetch schedule from Graph API");
+        return [];
       }
+
+      const data = await response.json();
+      const scheduleData = data.value?.[0];
+      const items = scheduleData?.scheduleItems || [];
+
+      // Map busy slots into { start_time: 'HH:mm:ss', end_time: 'HH:mm:ss' }
+      return items
+        .filter(item => item.status !== "free" && item.status !== "workingElsewhere")
+        .map(item => {
+          const startTimePart = (item.start?.dateTime || '').split('T')[1]?.substring(0, 8) || '00:00:00';
+          let endTimePart = (item.end?.dateTime || '').split('T')[1]?.substring(0, 8) || '23:59:59';
+          if (endTimePart === '00:00:00') endTimePart = '23:59:59';
+
+          return {
+            start_time: startTimePart,
+            end_time: endTimePart
+          };
+        });
+    } catch (err) {
+      console.error("Error fetching room schedule:", err);
+      return [];
+    }
+  };
+
+  // Trigger schedule fetch when room or date changes
+  useEffect(() => {
+    if (!room || !room.email) return;
+
+    const loadSchedule = async () => {
+      const busySlots = await fetchRoomScheduleForDate(room.email, date);
+      setAllBookingsOnDate(busySlots);
     };
-    fetchDaySchedule();
-  }, [date, roomId]);
+
+    loadSchedule();
+  }, [date, room]);
 
   // Outside Click closing listener
   useEffect(() => {
@@ -181,7 +206,7 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
     return `${displayHour}:${minStr} ${ampm}`;
   };
 
-  // --- FILTERED TIMES (PREVENTS COLLISION) ---
+  // --- FILTERED TIMES (PREVENTS COLLISION IN UI) ---
   const availableStartTimes = useMemo(() => {
     return timeSlots.filter(time => {
       const timeStr = `${time}:00`;
@@ -223,9 +248,9 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
   const handleBooking = async (e) => {
     if (e) e.preventDefault();
     
-    if (!room) {
+    if (!room || !room.email) {
       setToastType('error');
-      setToastMessage('Room data is still loading. Please try again.');
+      setToastMessage('Room data or room email is missing. Please try again.');
       setShowToast(true);
       return;
     }
@@ -244,94 +269,74 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
       return;
     }
 
+    const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const startDateTime = `${date}T${startTime}:00`;
     const endDateTime = `${date}T${endTime}:00`;
     const targetStartTimeStr = `${startTime}:00`;
     const targetEndTimeStr = `${endTime}:00`;
 
     try {
-      // 1. FORCED REAL-TIME CALENDAR VIEW FETCH (Double-Booking Guard)
-      const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const targetDateStart = `${date}T00:00:00`;
-      const targetDateEnd = `${date}T23:59:59`;
-      
-      const verifyRes = await fetch(
-        `https://graph.microsoft.com/v1.0/me/calendar/calendarView?startDateTime=${targetDateStart}&endDateTime=${targetDateEnd}`,
-        { 
-          headers: { 
-            "Authorization": `Bearer ${outlookToken}`,
-            "Prefer": `outlook.timezone="${localTimezone}"`
-          } 
-        }
-      );
+      // 1. PRE-FLIGHT CHECK: Re-query room's schedule immediately before booking to avoid double-booking
+      const freshBusySlots = await fetchRoomScheduleForDate(room.email, date);
 
-      if (!verifyRes.ok) {
-        throw new Error("Failed to verify real-time room availability.");
-      }
-
-      const verifyData = await verifyRes.json();
-      
-      // Parse exactly what is currently on the server right this millisecond
-      const freshBookings = (verifyData.value || []).map(event => {
-        const rawStart = event.start.dateTime.split('T')[1] || '';
-        const rawEnd = event.end.dateTime.split('T')[1] || '';
-        return {
-          room_id: roomId,
-          booker_id: event.organizer?.emailAddress?.address || '',
-          start_time: (rawStart.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0],
-          end_time: (rawEnd.match(/^\d{2}:\d{2}:\d{2}/) || ['00:00:00'])[0]
-        };
-      });
-
-      // 2. RUN COLLISION MATHEMATICS BEFORE CREATING REQUEST
-      const isNowDoubleBooked = freshBookings.some(b => 
+      const isNowDoubleBooked = freshBusySlots.some(b => 
         targetStartTimeStr < b.end_time && targetEndTimeStr > b.start_time
       );
 
-      // If a conflict exists, halt execution, update UI state so times look blocked, and warn user
       if (isNowDoubleBooked) {
-        setAllBookingsOnDate(freshBookings); // Sync UI schedule instantly
+        setAllBookingsOnDate(freshBusySlots);
         setIsSubmitting(false);
         
         setToastType('error');
         setToastMessage('Slot Unavailable! This time window was just reserved by another user.');
         setShowToast(true);
-        return; // <--- CRITICAL: Hard stop. Form submission aborted.
+        return;
       }
 
-      // 3. NO CONFLICTS FOUND - SAFE TO COMMIT RESERVATION
+      // 2. Prepare payload including both user attendee AND room resource email
       const selectedUserObj = usersList.find(u => u.id === selectedUserId);
-      const dynamicTitle = title;
 
+      const eventPayload = {
+        subject: title,
+        sensitivity: isPrivate ? "private" : "normal",
+        start: { dateTime: startDateTime, timeZone: localTimezone },
+        end: { dateTime: endDateTime, timeZone: localTimezone },
+        location: { 
+          displayName: room.name,
+          locationEmailAddress: room.email 
+        },
+        attendees: [
+          {
+            emailAddress: {
+              address: selectedUserObj?.email || '',
+              name: selectedUserObj?.full_name || ''
+            },
+            type: "required"
+          },
+          {
+            emailAddress: {
+              address: room.email,
+              name: room.name
+            },
+            type: "resource"
+          }
+        ]
+      };
+
+      // 3. Post event to Microsoft Graph
       const outlookResponse = await fetch('https://graph.microsoft.com/v1.0/me/events', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${outlookToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          subject: dynamicTitle,
-          sensitivity: isPrivate ? "private" : "normal",
-          start: { dateTime: startDateTime, timeZone: localTimezone },
-          end: { dateTime: endDateTime, timeZone: localTimezone },
-          location: { displayName: room.name },
-          attendees: [
-            {
-              emailAddress: {
-                address: selectedUserObj?.email || '',
-                name: selectedUserObj?.full_name || ''
-              },
-              type: "required"
-            }
-          ]
-        })
+        body: JSON.stringify(eventPayload)
       });
 
       if (!outlookResponse.ok) {
         throw new Error("Calendar service rejected the reservation request.");
       }
 
-      // 4. SUCCESS STATE REDIRECT
       setToastType('success');
       setToastMessage('Room booked successfully!');
       setShowToast(true);
@@ -368,7 +373,6 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
 
   return (
     <div className="min-h-screen w-full bg-[#ECECEC] text-slate-100 p-6 font-sans overflow-hidden select-none relative flex flex-col justify-between">
-      
       {/* TOAST SYSTEM */}
       <div className={`absolute top-6 left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] ${showToast ? 'translate-y-4 opacity-100' : '-translate-y-12 opacity-0 pointer-events-none'}`}>
         <div className="bg-black/70 backdrop-blur-xl border border-white/10 px-6 py-3.5 rounded-full shadow-[0_24px_50px_-12px_rgba(0,0,0,0.5)] flex items-center gap-3 w-max">
@@ -391,14 +395,13 @@ export default function BookingPage({ roomId, renderHeader, goHome, onSuccess })
 
       {/* Main Integrated Form Context Wrapper */}
       <form onSubmit={handleBooking} className="z-10 flex flex-col justify-start items-start h-full w-full gap-5 sm:gap-6 min-h-0 flex-1">
-        
         <div className="w-full text-left shrink-0">
           {renderHeader()}
         </div>
 
         <div className="flex items-center justify-between w-full gap-2">
           <h2 className="text-[1.35rem] sm:text-[1.7rem] lg:text-[2rem] font-semibold tracking-tight text-black">
-            Quick Book {room ? `— ${room.name}` : ''}
+            Quick Book
           </h2>
           <button 
             type="button"

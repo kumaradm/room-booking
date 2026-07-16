@@ -23,17 +23,19 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     return d;
   }, [dayOffset, todayDate]);
 
-  // Generate strict, UTC-translated ISO bounds matching the user's local day boundaries
+  // Generate exact UTC ISO bounds spanning the FULL LOCAL DAY (00:00:00.000 to 23:59:59.999)
   const queryRange = useMemo(() => {
-    const start = new Date(targetDate);
-    start.setHours(0, 0, 0, 0);
+    const startLocal = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0, 0);
+    const endLocal = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59, 999);
 
-    const end = new Date(targetDate);
-    end.setHours(23, 59, 59, 999);
+    // Formats local target date into YYYY-MM-DD string for filtering
+    const pad = (n) => String(n).padStart(2, '0');
+    const targetDateStr = `${targetDate.getFullYear()}-${pad(targetDate.getMonth() + 1)}-${pad(targetDate.getDate())}`;
 
     return {
-      startISO: start.toISOString(), // Automatically produces UTC "YYYY-MM-DDTHH:MM:SS.sssZ"
-      endISO: end.toISOString()
+      startISO: startLocal.toISOString(),
+      endISO: endLocal.toISOString(),
+      targetDateStr
     };
   }, [targetDate]);
 
@@ -41,8 +43,8 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
   const getOutlookToken = async () => {
     const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
     const request = {
-      scopes: ["User.Read"],
-      account: account,
+      scopes: ["Calendars.Read", "User.Read"],
+      account,
     };
     try {
       const silentResponse = await instance.acquireTokenSilent(request);
@@ -65,17 +67,16 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
         return;
       }
 
-      // 1. Detect device timezone to format returned event times correctly
+      // Detect device timezone to format returned event times correctly
       const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
       try {
         const response = await fetch(
           `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(roomEmail)}/calendarView` +
-          `?startDateTime=${queryRange.startISO}&endDateTime=${queryRange.endISO}`,
+          `?startDateTime=${encodeURIComponent(queryRange.startISO)}&endDateTime=${encodeURIComponent(queryRange.endISO)}`,
           {
             headers: {
               "Authorization": `Bearer ${token}`,
-              // 2. Instruct Microsoft to translate the matching payloads back into local time
               "Prefer": `outlook.timezone="${localTimezone}"`
             }
           }
@@ -83,29 +84,39 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
 
         if (response.ok) {
           const data = await response.json();
-          const scheduleItems = (data.value || []).map(event => {
-            // Find attendees marked as 'required'
-            const requiredAttendees = (event.attendees || []).filter(
-              attendee => attendee.type === 'required'
-            );
+          const scheduleItems = (data.value || [])
+            .filter(event => {
+              // Extract date in local format returned via outlook.timezone header
+              const eventStartDate = (event.start?.dateTime || '').split('T')[0];
+              return eventStartDate === queryRange.targetDateStr;
+            })
+            .map(event => {
+              const requiredAttendees = (event.attendees || []).filter(
+                attendee => attendee.type === 'required'
+              );
+              const attendeeNames = requiredAttendees
+                .map(a => a.emailAddress?.name || a.emailAddress?.address)
+                .filter(Boolean)
+                .join(', ');
+              const finalOrganizer = attendeeNames
+                || event.organizer?.emailAddress?.name
+                || event.organizer?.emailAddress?.address
+                || '';
 
-            // Map to names, fallback to email addresses, and join if there are multiple
-            const attendeeNames = requiredAttendees
-              .map(a => a.emailAddress?.name || a.emailAddress?.address)
-              .filter(Boolean)
-              .join(', ');
+              return {
+                subject: event.subject,
+                sensitivity: event.sensitivity,
+                start: event.start,
+                end: event.end,
+                organizer: finalOrganizer
+              };
+            })
+            .sort((a, b) => {
+              const aTime = a.start?.dateTime || '';
+              const bTime = b.start?.dateTime || '';
+              return aTime.localeCompare(bTime);
+            });
 
-            // Fallback to the default organizer if no required attendees are present
-            const finalOrganizer = attendeeNames || event.organizer?.emailAddress?.name || event.organizer?.emailAddress?.address || '';
-
-            return {
-              subject: event.subject,
-              sensitivity: event.sensitivity,
-              start: event.start,
-              end: event.end,
-              organizer: finalOrganizer
-            };
-          });
           setLiveEvents(scheduleItems);
         }
       } catch (err) {
@@ -144,14 +155,13 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     const isoString = typeof timeInput === 'object' ? timeInput.dateTime : timeInput;
     if (!isoString) return "";
 
-    // Because Outlook returns data matching our local timezone header config,
-    // we can safely extract the time part without UTC adjustment shifting the visual display.
     const timePart = isoString.split('T')[1] || '';
     const [hours, minutes] = timePart.split(':');
-    if (!hours || !minutes) return "";
+    if (hours === undefined || minutes === undefined) return "";
     
     const hr = parseInt(hours, 10);
-    return `${hr % 12 || 12}:${minutes} ${hr >= 12 ? 'PM' : 'AM'}`;
+    const displayHr = hr % 12 || 12; // Properly handles 0 (midnight) -> 12 AM
+    return `${displayHr}:${minutes} ${hr >= 12 ? 'PM' : 'AM'}`;
   };
 
   const handleSelectCalendarDay = (dateObj) => {
@@ -248,9 +258,7 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
             <div className="flex flex-col gap-3">
               {filteredBookings.map((event, index) => {
                 const isPrivate = event.sensitivity === 'private';
-                const displayOrganizer = typeof event.organizer === 'object'
-                  ? (event.organizer?.name || event.organizer?.address || 'Outlook Organizer')
-                  : (event.organizer || 'Outlook Organizer');
+                const displayOrganizer = event.organizer || 'Unknown';
 
                 return (
                   <div 
