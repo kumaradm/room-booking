@@ -1,11 +1,18 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useMsal, useIsAuthenticated, MsalProvider } from "@azure/msal-react"; 
 import { PublicClientApplication, InteractionStatus } from "@azure/msal-browser";
+
+// Components
 import Clock from './components/Clock';
 import SchedulePage from './components/SchedulePage';
 import BookingPage from './components/BookingPage';
 import OccupancySensor from './components/OccupancySensor';
+import ExtendMeetingPage from './components/ExtendMeetingPage';
+import CameraHost from './components/CameraHost'; 
 import { supabase } from './supabaseClient';
+
+// Global configurations
+const USE_SIMULATOR = false; // 👈 Set to false for live Outlook production data. The simulator UI will automatically destroy itself.
 
 const msalConfig = {
   auth: {
@@ -23,17 +30,23 @@ const msalInstance = new PublicClientApplication(msalConfig);
 
 // --- INNER APP LOGIC (Consumes MSAL Context Safely) ---
 function AppContent({ isMsalInitialized }) {
+  // --- ROUTING: Check if this device should be the camera ---
+  const queryParams = new URLSearchParams(window.location.search);
+  const isCameraMode = queryParams.get('mode') === 'camera';
+
+  // State
   const { instance, inProgress } = useMsal();
   const isAuthenticated = useIsAuthenticated();
-
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [room, setRoom] = useState(null);
-  const [bookings, setBookings] = useState([]); 
   const [isPersonDetected, setIsPersonDetected] = useState(false);
-  const [hasCheckedIn, setHasCheckedIn] = useState(false); 
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [showToast, setShowToast] = useState(false);
   const [isAuthResolving, setIsAuthResolving] = useState(true);
+
+  // Core App States
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [bookings, setBookings] = useState([]);
+  const [hasCheckedIn, setHasCheckedIn] = useState(false);
+  const [showToast, setShowToast] = useState(false);
 
   // Extend Page State
   const [extendHours, setExtendHours] = useState(0);
@@ -44,9 +57,85 @@ function AppContent({ isMsalInitialized }) {
   const lastActiveMeetingIdRef = useRef(null);
   const lastMinuteRef = useRef('');
 
+  // Simulated status for testing purposes (can be toggled to 'STARTING_SOON', 'IN_USE', 'BREAK')
+  const [simulatedStatus, setSimulatedStatus] = useState('IN_USE'); 
+
+  const statusConfigs = {
+    STARTING_SOON: {
+      text: "STARTING SOON",
+      bgStyle: "from-[#FFD60A] to-[#3D2800]",
+      textSize: "md:text-[6rem] xl:text-[7.5rem]",
+      subtext: "",
+      countdown: { 
+        label: "Next meeting will start in", 
+        primary: "04", 
+        primaryLabel: "Minutes", 
+        secondary: "12", 
+        secondaryLabel: "Seconds",
+        highlightSecondary: true
+      },
+      meeting: {
+        id: "mock-1",
+        booking_date: new Date().toISOString().split('T')[0],
+        title: "Weekly Sync & Alignment",
+        start_time: "05:30",
+        end_time: "06:00",
+        is_private: false,
+        users: { full_name: "Sarah Jenkins" }
+      }
+    },
+    IN_USE: {
+      text: "IN USE",
+      bgStyle: "from-[#FF3B30] to-[#5E0B08]",
+      textSize: "md:text-[8rem] xl:text-[9.5rem]",
+      subtext: "",
+      countdown: { 
+        label: "Meeting will end in", 
+        primary: "00", 
+        primaryLabel: "Hours", 
+        secondary: "18", 
+        secondaryLabel: "Minutes",
+        highlightSecondary: false
+      },
+      meeting: {
+        id: "mock-2",
+        booking_date: new Date().toISOString().split('T')[0],
+        title: "Design Review & Retro",
+        start_time: "05:00",
+        end_time: "05:30",
+        is_private: false,
+        users: { full_name: "Alex Rivera" }
+      }
+    },
+    BREAK: {
+      text: "BREAK",
+      bgStyle: "from-[#007AFF] to-[#002D6C]", 
+      textSize: "md:text-[8rem] xl:text-[9.5rem]",
+      subtext: "Calm down period active",
+      countdown: { 
+        label: "Break ends when meeting ends in", 
+        primary: "00", 
+        primaryLabel: "Hours", 
+        secondary: "14", 
+        secondaryLabel: "Minutes",
+        highlightSecondary: false
+      },
+      meeting: {
+        id: "mock-3",
+        booking_date: new Date().toISOString().split('T')[0],
+        title: "Scheduled Team Coffee Break",
+        start_time: "03:00",
+        end_time: "03:30",
+        is_private: false,
+        users: { full_name: "Operations Team" }
+      }
+    }
+  };
+
   // Get token helper for Graph API calls
-  const getOutlookToken = async () => {
+  const getOutlookToken = useCallback(async () => {
     const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
+    if (!account) return null;
     const request = {
       scopes: ["Calendars.ReadWrite", "User.Read"],
       account: account,
@@ -58,38 +147,33 @@ function AppContent({ isMsalInitialized }) {
       console.warn("Silent token fallback routing active...", err);
       return null;
     }
-  };
+  }, [instance]);
 
-// --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
-useEffect(() => {
-  if (!isMsalInitialized) return;
-  
-  // 1. If MSAL is currently processing a redirect or token, freeze and wait.
-  if (inProgress !== InteractionStatus.None) return;
-  
-  const accounts = instance.getAllAccounts();
+  // --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
+  useEffect(() => {
+    if (!isMsalInitialized) return;
+    if (inProgress !== InteractionStatus.None) return;
+    
+    const accounts = instance.getAllAccounts();
 
-  // 2. SAFETY CHECK: If accounts exist, but isAuthenticated is briefly false 
-  // during state transitions, DO NOT redirect! Just wait for MSAL to catch up.
-  if (accounts.length > 0) {
-    if (!instance.getActiveAccount()) {
-      instance.setActiveAccount(accounts[0]);
+    if (accounts.length > 0) {
+      if (!instance.getActiveAccount()) {
+        instance.setActiveAccount(accounts[0]);
+      }
+      setIsAuthResolving(false);
+      return; 
     }
-    setIsAuthResolving(false);
-    return; // Stop here, do not trigger a login redirect!
-  }
 
-  // 3. Only redirect if there are absolutely no accounts found and we aren't authenticated.
-  if (!isAuthenticated && accounts.length === 0) {
-    instance.loginRedirect({
-      scopes: ["Calendars.ReadWrite", "User.Read"]
-    }).catch(err => {
-      console.error("Redirect login failed to initiate:", err);
-    });
-  } else {
-    setIsAuthResolving(false);
-  }
-}, [instance, isMsalInitialized, inProgress, isAuthenticated]);
+    if (!isAuthenticated && accounts.length === 0) {
+      instance.loginRedirect({
+        scopes: ["Calendars.ReadWrite", "User.Read"]
+      }).catch(err => {
+        console.error("Redirect login failed to initiate:", err);
+      });
+    } else {
+      setIsAuthResolving(false);
+    }
+  }, [instance, isMsalInitialized, inProgress, isAuthenticated]);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -115,22 +199,20 @@ useEffect(() => {
     return {
       timeStr: currentTime.toTimeString().split(' ')[0],
       dateStr: (() => {
-  const d = currentTime;
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-})()
+        const d = currentTime;
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      })()
     };
   }, [currentTime]);
 
-  // --- AUTOMATIC TIME-BASED BREAK CALCULATION (3:00 PM - 3:30 PM) ---
   const isBreakActive = useMemo(() => {
     const nowMinutes = timeToMinutes(timeStrings.timeStr);
-    const breakStart = 15 * 60;     // 3:00 PM
-    const breakEnd = 15 * 60 + 30;  // 3:30 PM
+    const breakStart = 15 * 60;     
+    const breakEnd = 15 * 60 + 30;  
     return nowMinutes >= breakStart && nowMinutes < breakEnd;
   }, [timeStrings.timeStr]);
 
-  // --- OUTLOOK DYNAMIC EVENT FETCHING AND NORMALIZATION ---
   const fetchBookings = useCallback(async () => {
     if (!room?.email) return; 
     const token = await getOutlookToken();
@@ -143,7 +225,6 @@ useEffect(() => {
     const endLocal = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
 
     const pad = (num) => String(num).padStart(2, '0');
-    
     const formatLocalISO = (d) => 
       `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 
@@ -163,52 +244,49 @@ useEffect(() => {
 
       if (response.ok) {
         const data = await response.json();
-        
-const normalized = (data.value || [])
-  .map(event => {
-    const rawStart = event.start.dateTime.split('T')[1] || '';
-    const rawEnd = event.end.dateTime.split('T')[1] || '';
-    const requiredAttendees = (event.attendees || []).filter(a => a.type === 'required');
-    const attendeeNames = requiredAttendees
-      .map(a => a.emailAddress?.name || a.emailAddress?.address)
-      .filter(Boolean)
-      .join(', ');
-    const displayName = attendeeNames
-      || event.organizer?.emailAddress?.name
-      || event.organizer?.emailAddress?.address
-      || 'Unknown';
+        const normalized = (data.value || [])
+          .map(event => {
+            const rawStart = event.start.dateTime.split('T')[1] || '';
+            const rawEnd = event.end.dateTime.split('T')[1] || '';
+            const requiredAttendees = (event.attendees || []).filter(a => a.type === 'required');
+            const attendeeNames = requiredAttendees
+              .map(a => a.emailAddress?.name || a.emailAddress?.address)
+              .filter(Boolean)
+              .join(', ');
+            const displayName = attendeeNames
+              || event.organizer?.emailAddress?.name
+              || event.organizer?.emailAddress?.address
+              || 'Unknown';
 
-    return {
-      id: event.id,
-      booking_date: event.start.dateTime.split('T')[0],
-      start_time: rawStart.substring(0, 5),
-      end_time: rawEnd.substring(0, 5),
-      title: event.subject || 'No Title',
-      is_private: event.sensitivity === 'private',
-      users: { full_name: displayName }
-    };
-  })
-  // Only keep events belonging to today's local date
-  .filter(b => {
-    const pad = (n) => String(n).padStart(2, '0');
-    const today = new Date(currentTime);
-    const localDate = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
-    return b.booking_date === localDate;
-  })
-  .sort((a, b) => {
-    const [aH, aM] = a.start_time.split(':').map(Number);
-    const [bH, bM] = b.start_time.split(':').map(Number);
-    return (aH * 60 + aM) - (bH * 60 + bM);
-  });
+            return {
+              id: event.id,
+              booking_date: event.start.dateTime.split('T')[0],
+              start_time: rawStart.substring(0, 5),
+              end_time: rawEnd.substring(0, 5),
+              title: event.subject || 'No Title',
+              is_private: event.sensitivity === 'private',
+              users: { full_name: displayName }
+            };
+          })
+          .filter(b => {
+            const pad = (n) => String(n).padStart(2, '0');
+            const d = new Date(currentTime);
+            const localDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+            return b.booking_date === localDate;
+          })
+          .sort((a, b) => {
+            const [aH, aM] = a.start_time.split(':').map(Number);
+            const [bH, bM] = b.start_time.split(':').map(Number);
+            return (aH * 60 + aM) - (bH * 60 + bM);
+          });
 
         setBookings(normalized);
       }
     } catch (error) {
       console.error("Error synchronization with live Outlook graph records:", error);
     }
-  }, [room?.email, currentTime]);
+  }, [room?.email, currentTime, getOutlookToken]);
 
-  // Read Static data from Supabase Directory
   useEffect(() => {
     const fetchRoomData = async () => {
       try {
@@ -217,11 +295,10 @@ const normalized = (data.value || [])
           .select('*')
           .eq('name', 'Gee Room')
           .single();
-
         if (error) throw error;
         setRoom(data);
       } catch (error) {
-        console.error("Error fetching static directory from Supabase rooms layout:", error.message);
+        console.error("Error fetching room data:", error.message);
       }
     };
     fetchRoomData();
@@ -345,10 +422,20 @@ const normalized = (data.value || [])
     };
   }, [bookings, timeStrings, currentTime, isBreakActive]);
 
-  const currentStatus = kioskState.status;
-  const meetingToDisplay = kioskState.meetingToDisplay;
-  const activeMeeting = kioskState.activeMeeting;
-  const nextMeeting = kioskState.nextMeeting;
+  // --- CALCULATE FUTURE MEETINGS AMOUNT ---
+  const futureMeetingsCount = useMemo(() => {
+    const nowMinutes = timeToMinutes(timeStrings.timeStr);
+    return bookings.filter(b => {
+      if (b.booking_date !== timeStrings.dateStr) return false;
+      return timeToMinutes(b.start_time) > nowMinutes;
+    }).length;
+  }, [bookings, timeStrings]);
+
+  // --- OVERRIDE ROUTER WITH DEV DYNAMIC STATES ---
+  const currentStatus = USE_SIMULATOR ? statusConfigs[simulatedStatus] : kioskState.status;
+  const activeMeeting  = USE_SIMULATOR ? statusConfigs[simulatedStatus].meeting : kioskState.activeMeeting;
+  const meetingToDisplay = USE_SIMULATOR ? statusConfigs[simulatedStatus].meeting : kioskState.meetingToDisplay;
+  const nextMeeting = USE_SIMULATOR ? (simulatedStatus === 'STARTING_SOON' ? statusConfigs.STARTING_SOON.meeting : null) : kioskState.nextMeeting;
 
   const currentTargetMeeting = activeMeeting || nextMeeting;
   
@@ -359,7 +446,6 @@ const normalized = (data.value || [])
     return (nowMins >= startMins - 5) && (nowMins <= startMins + 10);
   }, [currentTargetMeeting, timeStrings.timeStr]);
 
-  // Determine if the "IN USE" meeting is in its last 5 minutes
   const isLastFiveMinutes = useMemo(() => {
     if (currentStatus?.text !== "IN USE" || !activeMeeting) return false;
     const nowMins = timeToMinutes(timeStrings.timeStr);
@@ -368,7 +454,6 @@ const normalized = (data.value || [])
     return remaining > 0 && remaining <= 5;
   }, [currentStatus, activeMeeting, timeStrings.timeStr]);
 
-  // Handle auto-reset of details if the meeting finishes or swaps
   useEffect(() => {
     if (currentTargetMeeting?.id !== lastActiveMeetingIdRef.current) {
       lastActiveMeetingIdRef.current = currentTargetMeeting?.id || null;
@@ -384,8 +469,8 @@ const normalized = (data.value || [])
     }
   }, [isPersonDetected, isWithinCheckInWindow]);
 
-  // --- LIVE OUTLOOK RESCISSION OF GHOST MEETINGS ---
   const handleCancelGhostMeeting = useCallback(async (meetingId) => {
+    if (!meetingId) return;
     console.warn(`Meeting ended or ghost detected (${meetingId}). Cleaning up calendar.`);
     const token = await getOutlookToken();
     if (!token) return;
@@ -403,9 +488,12 @@ const normalized = (data.value || [])
     } catch (error) {
       console.error("Failed executing ghost cancellation callback against Graph framework:", error);
     }
-  }, []);
+  }, [getOutlookToken]);
 
-  // --- OUTLOOK EVENT PATCH (EXTEND MEETING FUNCTION) ---
+  const handleResumeMeeting = () => {
+    console.log("Resuming current break session early.");
+  };
+
   const handleExtendMeeting = async () => {
     if (!activeMeeting) return;
     setIsExtending(true);
@@ -457,7 +545,6 @@ const normalized = (data.value || [])
     }
   };
 
-  // --- OCCUPANCY SENSOR WATCHDOG (Bypassed automatically on BREAK) ---
   useEffect(() => {
     if (!currentTargetMeeting || isBreakActive) { 
       emptyMinutesRef.current = 0;
@@ -492,13 +579,13 @@ const normalized = (data.value || [])
         emptyMinutesRef.current = 0; 
       }
     }
-  }, [currentTime, isPersonDetected, currentTargetMeeting, hasCheckedIn, isBreakActive, timeStrings.timeStr, handleCancelGhostMeeting]);
+  }, [currentTime, isPersonDetected, currentTargetMeeting, hasCheckedIn, isBreakActive, timeStrings, handleCancelGhostMeeting]);
 
   const showCheckInButton = isWithinCheckInWindow && !hasCheckedIn;
   const showRoomWarning = currentTargetMeeting && !isPersonDetected && (emptyMinutesRef.current > 0 || showCheckInButton) && !isBreakActive;
 
   const warningLabelText = useMemo(() => {
-    if (!showRoomWarning) return "";
+    if (!showRoomWarning || !currentTargetMeeting) return "";
     
     if (showCheckInButton) {
       const nowMins = timeToMinutes(timeStrings.timeStr);
@@ -672,6 +759,7 @@ const normalized = (data.value || [])
     );
   };
 
+  // --- RENDER ROUTER LAYER ---
   if (isAuthResolving || !isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-500 font-mono text-lg tracking-widest gap-4">
@@ -685,6 +773,17 @@ const normalized = (data.value || [])
   }
 
   if (!room) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 font-mono text-lg tracking-widest">LOADING...</div>;
+
+  // Camera Overlay Guide Frame Mode
+  // Camera Overlay Mode
+  if (isCameraMode) {
+    return (
+      <div className="relative w-screen h-screen bg-black flex items-center justify-center overflow-hidden">
+        {/* CameraHost now handles both streaming and drawing dynamic boxes */}
+        <CameraHost roomId={room.id} />
+      </div>
+    );
+  }
 
   if (currentPage === 'schedule') {
     return (
@@ -707,102 +806,22 @@ const normalized = (data.value || [])
     );
   }
 
-  // --- EXTEND MEETING PAGE (Shares booking page styling) ---
   if (currentPage === 'extend') {
     return (
-      <div className="min-h-screen w-full bg-[#f8fafc] text-slate-900 p-6 md:p-10 flex flex-col justify-between font-sans relative">
-        <div className="flex flex-col gap-8 w-full max-w-7xl mx-auto flex-1">
-          {renderHeader('black')}
-
-          <div className="flex flex-col gap-4 mt-4 animate-fade-in">
-            <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900">
-              Extend Active Meeting
-            </h2>
-            <p className="text-lg text-slate-500 max-w-xl">
-              Specify the extra duration you want to append to this current block.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center justify-center flex-1 py-4 max-w-4xl mx-auto w-full">
-            {/* Hours Counter Component */}
-            <div className="bg-white border border-slate-200 rounded-3xl p-8 flex flex-col items-center justify-center shadow-lg gap-6">
-              <span className="text-sm font-semibold tracking-wider text-slate-400 uppercase">Hours</span>
-              <div className="flex flex-col items-center gap-4 w-full">
-                <button 
-                  onClick={() => setExtendHours(prev => Math.min(prev + 1, 12))}
-                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
-                  </svg>
-                </button>
-                <span className="text-6xl md:text-8xl font-black text-slate-800 tabular-nums">
-                  {extendHours}
-                </span>
-                <button 
-                  onClick={() => setExtendHours(prev => Math.max(prev - 1, 0))}
-                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            {/* Minutes Counter Component */}
-            <div className="bg-white border border-slate-200 rounded-3xl p-8 flex flex-col items-center justify-center shadow-lg gap-6">
-              <span className="text-sm font-semibold tracking-wider text-slate-400 uppercase">Minutes</span>
-              <div className="flex flex-col items-center gap-4 w-full">
-                <button 
-                  onClick={() => setExtendMinutes(prev => (prev >= 45 ? 0 : prev + 15))}
-                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
-                  </svg>
-                </button>
-                <span className="text-6xl md:text-8xl font-black text-slate-800 tabular-nums">
-                  {String(extendMinutes).padStart(2, '0')}
-                </span>
-                <button 
-                  onClick={() => setExtendMinutes(prev => (prev <= 0 ? 45 : prev - 15))}
-                  className="w-20 h-20 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-md transition-all active:scale-95"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor" className="size-8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Action Footer */}
-        <div className="w-full max-w-7xl mx-auto mt-8 border-t border-slate-200 pt-6 flex flex-row justify-between items-center">
-          <button 
-            onClick={() => {
-              setExtendHours(0);
-              setExtendMinutes(15);
-              setCurrentPage('dashboard');
-            }}
-            className="px-8 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-2xl transition-all"
-          >
-            Cancel
-          </button>
-
-          <button 
-            onClick={handleExtendMeeting}
-            disabled={isExtending || (extendHours === 0 && extendMinutes === 0)}
-            className="px-10 py-4 bg-[#007AFF] hover:bg-[#0051C3] disabled:opacity-50 text-white font-bold rounded-2xl shadow-lg transition-all flex items-center gap-3"
-          >
-            {isExtending ? 'Extending...' : 'Extend'}
-          </button>
-        </div>
-      </div>
+      <ExtendMeetingPage
+        extendHours={extendHours}
+        setExtendHours={setExtendHours}
+        extendMinutes={extendMinutes}
+        setExtendMinutes={setExtendMinutes}
+        isExtending={isExtending}
+        handleExtendMeeting={handleExtendMeeting}
+        setCurrentPage={setCurrentPage}
+        renderHeader={renderHeader}
+      />
     );
   }
 
+  // Kiosk Dashboard Default Dynamic Wrapper Layout
   return (
     <div className={`h-screen w-screen max-h-screen bg-gradient-to-br ${currentStatus.bgStyle} text-slate-100 p-4 font-sans transition-all duration-1000 ease-in-out overflow-hidden select-none relative flex flex-col justify-between`}>  
       <div className={`absolute top-8 left-1/2 -translate-x-1/2 z-50 transition-all duration-500 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] ${showToast ? 'translate-y-4 opacity-100' : '-translate-y-12 opacity-0 pointer-events-none'}`}>
@@ -843,23 +862,27 @@ const normalized = (data.value || [])
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z" />
                 </svg>
                 <span className="text-lg md:text-2xl font-light text-white">Meeting's Schedule</span>
+                
+                {/* Badge now shows unconditionally, is completely static, and defaults to 0 */}
+                <span className="absolute -top-2 -right-2 flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white shadow-lg">
+                  {futureMeetingsCount}
+                </span>
               </button>
-            ) : currentStatus.text === "BREAK" ? (
-              // BREAK STATE LEFT BUTTON -> END MEETING EARLY
+            ) : currentStatus.text === "BREAK" || currentStatus.text === "IN USE" ? (
               <button 
                 onClick={() => handleCancelGhostMeeting(activeMeeting?.id)}
-                className={`${scheduleButtonClass} border-red-500/30 hover:border-red-500/60 bg-red-500/10 hover:bg-red-500/20`}
+                className={scheduleButtonClass}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-red-400">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-white">
                   <path strokeLinecap="round" strokeLinejoin="round" d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
                 </svg>
-                <span className="text-lg md:text-2xl font-semibold text-red-200">End Meeting Early</span>
+                <span className="text-lg md:text-2xl font-light text-white">End Meeting Early</span>
               </button>
             ) : (
               <div className="w-56 md:w-80 hidden md:block pointer-events-none" />
             )}
 
-            {/* MIDDLE WARNING BANNER (Hidden during breaks) */}
+            {/* MIDDLE WARNING BANNER */}
             {showRoomWarning && (
               <div className="absolute left-1/2 -translate-x-1/2 flex flex-row items-center gap-3 text-amber-400 font-medium max-w-[45%] text-center justify-center pointer-events-none animate-fade-in px-4 z-10">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-6 shrink-0 animate-pulse">
@@ -873,7 +896,15 @@ const normalized = (data.value || [])
 
             {/* RIGHT COMPONENT SLOT */}
             {currentStatus.text === "BREAK" ? (
-              <div className="w-56 md:w-80 h-16 md:h-20 ml-auto pointer-events-none" />
+              <button 
+                onClick={handleResumeMeeting}
+                className={`${actionButtonClass} ml-auto`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-slate-200 group-hover:text-white transition-colors">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347c-.75.412-1.667-.13-1.667-.986V5.653Z" />
+                </svg>
+                <span className="text-lg md:text-2xl font-light text-white">Resume Meeting</span>
+              </button>
             ) : showCheckInButton ? (
               <button 
                 onClick={handleCheckIn}
@@ -885,15 +916,14 @@ const normalized = (data.value || [])
                 <span className="text-lg md:text-2xl font-black text-amber-300 uppercase">Check In</span>
               </button>
             ) : isLastFiveMinutes ? (
-              // --- DYNAMIC "EXTEND MEETING" BUTTON TRIGGER ---
               <button 
                 onClick={() => setCurrentPage('extend')}
-                className={`${actionButtonClass} ml-auto border-emerald-500/30 hover:border-emerald-500/60 bg-emerald-500/10 hover:bg-emerald-500/20`}
+                className={`${actionButtonClass} ml-auto`}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-7 text-emerald-400">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-slate-200 group-hover:text-white transition-colors">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                 </svg>
-                <span className="text-lg md:text-2xl font-bold text-emerald-300">Extend Meeting</span>
+                <span className="text-lg md:text-2xl font-light text-white">Extend Meeting</span>
               </button>
             ) : currentStatus.text !== "AVAILABLE" ? (
               <div className="w-56 md:w-80 h-16 md:h-20 ml-auto" />
@@ -913,6 +943,36 @@ const normalized = (data.value || [])
       </div>
 
       <OccupancySensor roomId={room.id} onOccupancyChange={setIsPersonDetected} />
+
+      {/* FLOATING DEV SIMULATOR CONTROL PANEL (Only renders when simulation mode is active) */}
+      {USE_SIMULATOR && (
+        <div className="fixed bottom-4 left-4 z-[9999] bg-slate-900/95 text-white p-4 rounded-2xl shadow-2xl flex flex-col gap-2 border border-slate-700 backdrop-blur-md">
+          <span className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">Dev Simulator</span>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setSimulatedStatus('STARTING_SOON')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${simulatedStatus === 'STARTING_SOON' ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 hover:bg-slate-700'}`}
+            >
+              ⏳ Starting Soon
+            </button>
+            <button 
+              onClick={() => setSimulatedStatus('IN_USE')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${simulatedStatus === 'IN_USE' ? 'bg-red-500 text-white' : 'bg-slate-800 hover:bg-slate-700'}`}
+            >
+              🔴 In Use
+            </button>
+            <button 
+              onClick={() => setSimulatedStatus('BREAK')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${simulatedStatus === 'BREAK' ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 hover:bg-slate-700'}`}
+            >
+              🟢 Break
+            </button>
+          </div>
+          <div className="text-[10px] text-slate-400 mt-1">
+            Active Meeting: <strong className="text-white">{activeMeeting ? activeMeeting.title : "None"}</strong>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

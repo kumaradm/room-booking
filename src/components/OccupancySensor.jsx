@@ -1,69 +1,35 @@
-import React, { useRef, useEffect } from 'react';
-import Webcam from 'react-webcam';
-import * as tf from '@tensorflow/tfjs';
-import * as cocoSsd from '@tensorflow-models/coco-ssd';
+import React, { useEffect } from 'react';
 import { supabase } from '../supabaseClient';
 
 export default function OccupancySensor({ roomId, onOccupancyChange }) {
-  const webcamRef = useRef(null);
-  const lastStateRef = useRef(false);
-
   useEffect(() => {
-    let intervalId;
-    let model;
+    if (!roomId) return;
 
-    const updateRoomStatus = async (occupied) => {
-      // 1. Bubble the status up to App.js instantly!
-      if (onOccupancyChange) {
-        onOccupancyChange(occupied);
-      }
+    // Listen to the WebSocket broadcast channel emitted by the CameraHost
+    const channel = supabase.channel('room-occupancy-sync');
 
-      // 2. Only write to Supabase if the state actually changes
-      if (occupied !== lastStateRef.current) {
-        lastStateRef.current = occupied;
+    channel
+      .on('broadcast', { event: 'occupancy_change' }, (response) => {
+        const { payload } = response;
         
-        await supabase
-          .from('rooms')
-          .update({ is_occupied: occupied, updated_at: new Date() })
-          .eq('id', roomId);
-      }
-    };
-
-    const initSensor = async () => {
-      await tf.ready();
-      model = await cocoSsd.load();
-      
-      const performCheck = async () => {
-        if (webcamRef.current && webcamRef.current.video.readyState === 4) {
-          const video = webcamRef.current.video;
-          const predictions = await model.detect(video);
-          
-          const personFound = predictions.some(p => p.class === 'person' && p.score > 0.6);
-          updateRoomStatus(personFound);
-          console.log(`[Smart Sensor Check] - Occupied: ${personFound}`);
+        // Ensure the payload matches the specific room
+        if (payload && payload.roomId === roomId) {
+          if (onOccupancyChange) {
+            onOccupancyChange(payload.isPersonDetected);
+          }
         }
-      };
-
-      // Initial run
-      performCheck();
-
-      // Check every 10 seconds for faster kiosk responsiveness 
-      // (Checking every 5 mins is too slow for a 5-min cancellation deadline)
-      intervalId = setInterval(performCheck, 10000); 
-    };
-
-    if (roomId) {
-      initSensor();
-    }
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[Kiosk Sensor Client] Realtime synchronization linked.');
+        }
+      });
 
     return () => {
-      if (intervalId) clearInterval(intervalId);
+      supabase.removeChannel(channel);
     };
   }, [roomId, onOccupancyChange]);
 
-  return (
-    <div className="opacity-0 absolute bottom-0 right-0 w-1 h-1 overflow-hidden pointer-events-none">
-      <Webcam ref={webcamRef} muted={true} width={160} height={120} />
-    </div>
-  );
+  // Acts purely as a network-to-state proxy component, returning nothing to render
+  return null;
 }

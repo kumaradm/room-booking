@@ -10,7 +10,7 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
   const [liveEvents, setLiveEvents] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Set reference timeline coordinates based on the device's local clock
+  // Set reference timeline coordinates based on local clock
   const todayDate = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -23,12 +23,11 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     return d;
   }, [dayOffset, todayDate]);
 
-  // Generate exact UTC ISO bounds spanning the FULL LOCAL DAY (00:00:00.000 to 23:59:59.999)
+  // Generate exact UTC ISO bounds spanning the FULL LOCAL DAY
   const queryRange = useMemo(() => {
     const startLocal = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0, 0);
     const endLocal = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59, 999);
 
-    // Formats local target date into YYYY-MM-DD string for filtering
     const pad = (n) => String(n).padStart(2, '0');
     const targetDateStr = `${targetDate.getFullYear()}-${pad(targetDate.getMonth() + 1)}-${pad(targetDate.getDate())}`;
 
@@ -67,7 +66,6 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
         return;
       }
 
-      // Detect device timezone to format returned event times correctly
       const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
       try {
@@ -86,7 +84,6 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
           const data = await response.json();
           const scheduleItems = (data.value || [])
             .filter(event => {
-              // Extract date in local format returned via outlook.timezone header
               const eventStartDate = (event.start?.dateTime || '').split('T')[0];
               return eventStartDate === queryRange.targetDateStr;
             })
@@ -129,7 +126,6 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     fetchOutlookDaySchedule();
   }, [queryRange, roomEmail]);
 
-  // Filter local live state values based on the search criteria string
   const filteredBookings = useMemo(() => {
     return liveEvents.filter(event => {
       const normalizedSearch = searchTerm.toLowerCase();
@@ -148,7 +144,6 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     });
   }, [liveEvents, searchTerm]);
 
-  // Helper utility formatting Microsoft payload objects safely into AM/PM
   const formatTime = (timeInput) => {
     if (!timeInput) return "";
     
@@ -160,7 +155,7 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
     if (hours === undefined || minutes === undefined) return "";
     
     const hr = parseInt(hours, 10);
-    const displayHr = hr % 12 || 12; // Properly handles 0 (midnight) -> 12 AM
+    const displayHr = hr % 12 || 12;
     return `${displayHr}:${minutes} ${hr >= 12 ? 'PM' : 'AM'}`;
   };
 
@@ -175,18 +170,20 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#F2F2F7] text-[#1C1C1E] p-6 font-sans overflow-hidden select-none relative flex flex-col">
+    <div className="min-h-screen w-full bg-[#C5C5C7] text-slate-900 p-6 font-sans overflow-hidden select-none relative flex flex-col">
       <div className="z-10 flex flex-col h-full w-full gap-5 sm:gap-6 min-h-0 flex-1">
         <div className="w-full text-left shrink-0">
           {renderHeader()}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between w-full gap-2">
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4 justify-start flex-1 min-w-0">
-            <h2 className="text-[1.35rem] sm:text-[1.7rem] lg:text-[2rem] font-semibold tracking-tight text-black">
-              Meeting Schedule
+        {/* Layout Row matching the second reference image */}
+        <div className="flex items-center justify-between w-full mt-2 pr-4">
+          <div className="flex items-center gap-4 flex-1 min-w-0">
+            <h2 className="text-4xl font-normal tracking-tight text-[#333333] shrink-0">
+              Meeting's Schedule
             </h2>
 
+            {/* Date Pill Selector */}
             <div className="relative inline-block text-left shrink-0">
               <button 
                 onClick={(e) => {
@@ -194,14 +191,11 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
                   setIsDatePickerOpen(prev => !prev);
                 }}
                 type="button"
-                className="flex items-center gap-1.5 bg-[#E5E5EA] hover:bg-[#D1D1D6] active:scale-95 text-black text-sm sm:text-base font-medium px-4 py-2.5 rounded-full transition-all focus:outline-none shadow-sm"
+                className="flex items-center gap-1 bg-[#E1E1E4] hover:bg-neutral-300 active:scale-95 text-[#333333] text-sm font-normal px-4 py-2 rounded-full transition-all focus:outline-none shadow-sm"
               >
                 <span>
-                  {dayOffset === 0 ? "Today" : targetDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {targetDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
                 </span>
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="size-3.5 opacity-80">
-                  <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
-                </svg>
               </button>
 
               {isDatePickerOpen && (
@@ -216,34 +210,40 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
               )}
             </div>
 
-            <div className="relative flex-1 min-w-[180px] flex items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="absolute left-3.5 size-4 text-[#8E8E93] z-20">
+            {/* Styled Search Box */}
+            <div className="relative flex-1 max-w-lg flex items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="absolute left-4 size-4 text-slate-500 z-20">
                 <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.604 10.604Z" />
               </svg>
               <input 
                 type="text"
-                placeholder="Search title or host"
+                placeholder="Search Meeting"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="bg-[#E5E5EA]/80 text-black placeholder-[#8E8E93] rounded-full pl-10 pr-4 py-2.5 text-sm sm:text-base w-full focus:outline-none focus:bg-[#E5E5EA] transition-all relative z-10 shadow-sm"
+                className="bg-[#E1E1E4] text-slate-800 placeholder-slate-500 rounded-full pl-10 pr-10 py-2 text-sm w-full focus:outline-none transition-all relative z-10 shadow-sm"
               />
+              {/* Mic Icon matches picture right edge input */}
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="absolute right-4 size-4 text-slate-500 z-20">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+              </svg>
             </div>
           </div>
 
           <button 
             onClick={goHome}
             aria-label="Close"
-            className="bg-white hover:bg-[#E5E5EA] text-black border border-neutral-200 rounded-full w-11 h-11 flex items-center justify-center transition shadow-sm group shrink-0"
+            className="bg-white hover:bg-neutral-100 text-black rounded-full w-12 h-12 flex items-center justify-center transition shadow-md shrink-0"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="size-4 opacity-70">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-6 text-slate-800">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="w-full flex-1 min-h-0 overflow-y-auto pr-1 pb-2">
+        {/* Dynamic Card Container Box */}
+        <div className="w-full flex-1 min-h-0 overflow-y-auto pr-1 pb-4 mt-2">
           {isLoading ? (
-            <div className="bg-white rounded-[1.5rem] p-10 text-center text-[#8E8E93] text-lg font-medium shadow-sm h-full flex flex-col items-center justify-center border border-neutral-200/60 gap-3">
+            <div className="bg-white rounded-[1.5rem] p-10 text-center text-slate-500 text-lg font-medium shadow-sm h-full flex flex-col items-center justify-center border border-neutral-200/60 gap-3">
               <svg className="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -251,11 +251,11 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
               <span>Synchronizing with Outlook...</span>
             </div>
           ) : filteredBookings.length === 0 ? (
-            <div className="bg-white rounded-[1.5rem] p-10 sm:p-12 text-center text-[#8E8E93] text-lg sm:text-xl font-medium shadow-sm h-full flex items-center justify-center border border-neutral-200/60">
+            <div className="bg-white rounded-[2rem] p-10 text-center text-slate-400 text-xl font-normal shadow-md h-full flex items-center justify-center">
               No Meetings Scheduled
             </div>
           ) : (
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-4">
               {filteredBookings.map((event, index) => {
                 const isPrivate = event.sensitivity === 'private';
                 const displayOrganizer = event.organizer || 'Unknown';
@@ -263,24 +263,32 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
                 return (
                   <div 
                     key={index} 
-                    className="bg-white border border-neutral-200/60 rounded-[1.2rem] flex justify-between items-center px-5 sm:px-6 py-4 sm:py-5 hover:bg-neutral-50 transition-all duration-150 text-left shadow-sm"
+                    className="bg-white rounded-[2rem] flex flex-col justify-center px-8 py-6 hover:bg-neutral-50 transition-all duration-150 text-left shadow-md"
                   >
-                    <div className="min-w-0 text-left">
-                      <h4 className={`text-[1rem] sm:text-[1.05rem] font-semibold tracking-tight truncate ${isPrivate ? 'text-neutral-500 italic font-medium' : 'text-[#1C1C1E]'}`}>
-                        {isPrivate ? 'Private Meeting' : (event.subject || 'No Title')}
-                      </h4>
-                      
-                      <p className="text-sm sm:text-[0.95rem] text-[#8E8E93] mt-1.5 font-medium truncate flex items-center gap-x-2">
-                        <span className="inline-flex items-center gap-0.5">
-                          <span className="font-semibold text-neutral-600">
-                            {formatTime(event.start)} - {formatTime(event.end)}
-                          </span>
+                    <h4 className={`text-2xl font-semibold tracking-tight truncate ${isPrivate ? 'text-neutral-500 italic' : 'text-slate-900'}`}>
+                      {isPrivate ? 'Private Meeting' : (event.subject || 'No Title')}
+                    </h4>
+                    
+                    <div className="flex flex-wrap items-center gap-6 mt-3 text-slate-500">
+                      {/* Time Field Block */}
+                      <span className="inline-flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-5 text-slate-400">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                        </svg>
+                        <span className="text-base font-normal text-slate-500">
+                          {formatTime(event.start)} - {formatTime(event.end)}
                         </span>
-                        <span>•</span>
-                        <span className="inline-flex items-center gap-0.5">
-                          <span>{displayOrganizer}</span>
+                      </span>
+
+                      {/* User Organizer Block */}
+                      <span className="inline-flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-5 text-slate-400">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                        </svg>
+                        <span className="text-base font-normal text-slate-500">
+                          {displayOrganizer}
                         </span>
-                      </p>
+                      </span>
                     </div>
                   </div>
                 );
