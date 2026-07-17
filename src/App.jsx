@@ -230,7 +230,7 @@ function AppContent({ isMsalInitialized }) {
 
     const startStr = formatLocalISO(startLocal);
     const endStr = formatLocalISO(endLocal);
-
+    
     try {
       const response = await fetch(
         `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${startStr}&endDateTime=${endStr}&$orderby=start/dateTime`,
@@ -443,7 +443,7 @@ function AppContent({ isMsalInitialized }) {
     if (!currentTargetMeeting) return false;
     const nowMins = timeToMinutes(timeStrings.timeStr);
     const startMins = timeToMinutes(currentTargetMeeting.start_time);
-    return (nowMins >= startMins - 5) && (nowMins <= startMins + 10);
+    return (nowMins >= startMins - 5) && (nowMins <= startMins + 5);
   }, [currentTargetMeeting, timeStrings.timeStr]);
 
   const isLastFiveMinutes = useMemo(() => {

@@ -67,11 +67,11 @@ export default function SchedulePage({ roomEmail, renderHeader, goHome }) {
       }
 
       const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const roomCalendarId = "AQMkADAwATM0MDAAMS1mY2MAMS1kMDdiLTAwAi0wMAoARgAAA2bDAfRfkh9Oi4Kp_Id_0EsHAFbmQj_9WkJAh9iS0Tscai0AAAIBBgAAAFbmQj_9WkJAh9iS0Tscai0ACRVIdO0AAAA=";
 
       try {
         const response = await fetch(
-          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(roomEmail)}/calendarView` +
-          `?startDateTime=${encodeURIComponent(queryRange.startISO)}&endDateTime=${encodeURIComponent(queryRange.endISO)}`,
+          `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${queryRange.startISO}&endDateTime=${queryRange.endISO}&$orderby=start/dateTime`,
           {
             headers: {
               "Authorization": `Bearer ${token}`,
