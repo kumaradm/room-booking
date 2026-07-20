@@ -64,6 +64,10 @@ export default function CameraHost({ roomId }) {
     let lastDetectionTime = 0;
     const DETECTION_INTERVAL = 150; // Runs evaluation ~6-7 times a second (light on CPU)
 
+    // Set up real-time broadcast channel matching the occupancy sensor client
+    const channel = supabase.channel('room-occupancy-sync');
+    channel.subscribe();
+
     const detectFrame = async () => {
       const video = videoRef.current;
       if (!video || video.readyState !== 4) {
@@ -92,10 +96,18 @@ export default function CameraHost({ roomId }) {
           if (roomId && isOccupied !== lastOccupiedRef.current) {
             lastOccupiedRef.current = isOccupied;
             
+            // Update base record table
             await supabase
               .from('rooms')
               .update({ is_occupied: isOccupied, updated_at: new Date() })
               .eq('id', roomId);
+
+            // FIX: Broadcast state changes to the homepage over WebSockets
+            channel.send({
+              type: 'broadcast',
+              event: 'occupancy_change',
+              payload: { roomId, isPersonDetected: isOccupied }
+            });
           }
 
         } catch (err) {
@@ -110,16 +122,13 @@ export default function CameraHost({ roomId }) {
 
     return () => {
       cancelAnimationFrame(animationFrameId);
+      supabase.removeChannel(channel);
     };
   }, [model, roomId]);
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full max-w-4xl px-4 py-8">
-      
-      {/* Video Container viewport */}
       <div className="relative w-full aspect-video rounded-3xl overflow-hidden border border-slate-800 bg-slate-950 shadow-2xl">
-        
-        {/* Loading and Error Overlays */}
         {isLoading && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950 z-20 gap-3">
             <svg className="animate-spin h-8 w-8 text-emerald-500" viewBox="0 0 24 24" fill="none">
@@ -141,14 +150,11 @@ export default function CameraHost({ roomId }) {
           autoPlay
           playsInline
           muted
-          className="w-full h-full object-cover transform -scale-x-100" // Mirrors webcam for normal viewing orientation
+          className="w-full h-full object-cover transform -scale-x-100"
         />
       </div>
 
-      {/* --- PEOPLE COUNTER DISPLAY BOARD (Positioned directly under camera) --- */}
       <div className="mt-6 bg-slate-900/60 border border-slate-800/80 px-8 py-5 rounded-[2rem] flex flex-row items-center justify-between gap-8 w-full shadow-2xl backdrop-blur-xl">
-        
-        {/* Left Side: Status Lights */}
         <div className="flex items-center gap-4">
           <span className="relative flex h-4 w-4">
             <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 transition-all duration-500 ${personCount > 0 ? 'bg-emerald-400' : 'bg-slate-500'}`} />
@@ -162,10 +168,8 @@ export default function CameraHost({ roomId }) {
           </div>
         </div>
 
-        {/* Vertical divider */}
         <div className="h-10 w-[1px] bg-slate-800" />
 
-        {/* Right Side: Total Count Badge */}
         <div className="flex items-center gap-4">
           <span className="text-white/40 font-bold text-[10px] uppercase tracking-widest text-right leading-none block">
             Current<br />Headcount
@@ -178,7 +182,6 @@ export default function CameraHost({ roomId }) {
             {personCount}
           </div>
         </div>
-
       </div>
     </div>
   );

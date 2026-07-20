@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
 
-// Status Configs for Developer Simulator
 export const SIMULATED_STATUS_CONFIGS = {
   STARTING_SOON: {
     text: "STARTING SOON",
@@ -74,7 +73,6 @@ export function useKioskState({
   formatTime 
 }) {
   
-  // 1. LIVE PRODUCTION LOGIC LAYER
   const liveState = useMemo(() => {
     const nowMinutes = timeToMinutes(timeStrings.timeStr);
 
@@ -98,9 +96,10 @@ export function useKioskState({
       const displayMins = (diffMins % 60).toString().padStart(2, '0');
 
       return {
-        meetingToDisplay: active, 
+        // FIX: The notification bubble card should only show the next upcoming meeting
+        meetingToDisplay: nextAhead || null, 
         activeMeeting: active, 
-        nextMeeting: null,
+        nextMeeting: nextAhead || null,
         status: {
           text: isBreakActive ? "BREAK" : "IN USE",
           bgStyle: isBreakActive ? "from-[#007AFF] to-[#002D6C]" : "from-[#FF3B30] to-[#5E0B08]",
@@ -165,12 +164,9 @@ export function useKioskState({
     };
   }, [bookings, timeStrings, currentTime, isBreakActive, formatTime]);
 
-
-  // 2. DEV SIMULATION LOGIC LAYER
   const simulatedState = useMemo(() => {
     const baseConfig = SIMULATED_STATUS_CONFIGS[simulatedStatus];
     
-    // Inject dynamic mock timing attributes relative to right now
     const mockMeeting = {
       ...baseConfig.meeting,
       booking_date: timeStrings.dateStr,
@@ -182,23 +178,23 @@ export function useKioskState({
       return { status: baseConfig, activeMeeting: null, nextMeeting: null, meetingToDisplay: null };
     }
 
-    // Dynamic Countdown calculations for simulation mode
     let displayPri = "00";
     let displaySec = "00";
 
     if (simulatedStatus === 'STARTING_SOON') {
-      const targetDate = new Date(currentTime.getTime() + 4 * 60000 + 12 * 1000); // 4m 12s mock delta
+      const targetDate = new Date(currentTime.getTime() + 4 * 60000 + 12 * 1000); 
       const diffMs = Math.max(0, targetDate - currentTime);
       displayPri = Math.floor(diffMs / 60000).toString().padStart(2, '0');
       displaySec = Math.floor((diffMs % 60000) / 1000).toString().padStart(2, '0');
     } else {
-      displaySec = "18"; // Hardcoded remaining dynamic placeholder min representation
+      displaySec = "18"; 
     }
 
     return {
       activeMeeting: simulatedStatus !== 'STARTING_SOON' ? mockMeeting : null,
+      // FIX: Adjusting simulation layer to keep mock upcoming configurations clear of active space
       nextMeeting: simulatedStatus === 'STARTING_SOON' ? mockMeeting : null,
-      meetingToDisplay: mockMeeting,
+      meetingToDisplay: simulatedStatus === 'STARTING_SOON' ? mockMeeting : null, 
       status: {
         ...baseConfig,
         countdown: {
@@ -210,6 +206,5 @@ export function useKioskState({
     };
   }, [simulatedStatus, currentTime, timeStrings.dateStr]);
 
-  // Return appropriate state map based on global developer configuration flag
   return useSimulator ? simulatedState : liveState;
 }
