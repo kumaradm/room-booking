@@ -594,7 +594,7 @@ function AppContent({ isMsalInitialized }) {
     }
   };
 
-    // ✅ PLACE THE EFFECT HERE (After activeMeeting is defined)
+  // ✅ PLACE THE EFFECT HERE (After activeMeeting is defined)
   useEffect(() => {
     if (!activeMeeting) return;
 

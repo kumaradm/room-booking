@@ -72,7 +72,6 @@ export function useKioskState({
   isBreakActive,
   formatTime 
 }) {
-  
   const liveState = useMemo(() => {
     const nowMinutes = timeToMinutes(timeStrings.timeStr);
 
@@ -88,7 +87,6 @@ export function useKioskState({
       return timeToMinutes(b.start_time) > nowMinutes;
     });
 
-    // FIX: Check-in window is 5 mins BEFORE to 5 mins AFTER start time (10 min total window)
     const canCheckIn = bookings.some(b => {
       if (b.booking_date !== timeStrings.dateStr) return false;
       const start = timeToMinutes(b.start_time);
@@ -103,8 +101,7 @@ export function useKioskState({
       const displayMins = (diffMins % 60).toString().padStart(2, '0');
 
       return {
-        // FIX: Bubble notification displays NEXT meeting only (or null if none)
-        meetingToDisplay: nextAhead || null, 
+        meetingToDisplay: active, 
         activeMeeting: active, 
         nextMeeting: nextAhead || null,
         canCheckIn,
@@ -112,7 +109,7 @@ export function useKioskState({
           text: isBreakActive ? "BREAK" : "IN USE",
           bgStyle: isBreakActive ? "from-[#007AFF] to-[#002D6C]" : "from-[#FF3B30] to-[#5E0B08]",
           textSize: "md:text-[8rem] xl:text-[9.5rem]",
-          // FIX: Pass plain text title to display directly under "IN USE" text
+          subtext: isBreakActive ? "Calm down period active" : "",
           activeTitle: active.is_private ? "Private Meeting" : active.title,
           activeHost: active.users?.full_name || "Organizer",
           countdown: { 
@@ -134,8 +131,8 @@ export function useKioskState({
         const targetDate = new Date(currentTime);
         targetDate.setHours(targetH, targetM, 0, 0);
         
-        const diffMs = targetDate - currentTime;
-        const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+        const diffMs = Math.max(0, targetDate - currentTime);
+        const totalSeconds = Math.floor(diffMs / 1000);
         const displayMins = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
         const displaySecs = (totalSeconds % 60).toString().padStart(2, '0');
 
@@ -178,7 +175,7 @@ export function useKioskState({
   }, [bookings, timeStrings, currentTime, isBreakActive, formatTime]);
 
   const simulatedState = useMemo(() => {
-    const baseConfig = SIMULATED_STATUS_CONFIGS[simulatedStatus];
+    const baseConfig = SIMULATED_STATUS_CONFIGS[simulatedStatus] || SIMULATED_STATUS_CONFIGS.IN_USE;
     
     const mockActive = simulatedStatus !== 'STARTING_SOON' ? {
       ...baseConfig.meeting,
@@ -209,8 +206,7 @@ export function useKioskState({
     return {
       activeMeeting: mockActive,
       nextMeeting: mockNext,
-      // FIX: Ensure bubble notification card tracks UPCOMING meeting only
-      meetingToDisplay: mockNext, 
+      meetingToDisplay: mockActive || mockNext, 
       canCheckIn: true,
       status: {
         ...baseConfig,
