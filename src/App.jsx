@@ -437,27 +437,6 @@ function AppContent({ isMsalInitialized }) {
   const meetingToDisplay = USE_SIMULATOR ? statusConfigs[simulatedStatus].meeting : kioskState.meetingToDisplay;
   const nextMeeting = USE_SIMULATOR ? (simulatedStatus === 'STARTING_SOON' ? statusConfigs.STARTING_SOON.meeting : null) : kioskState.nextMeeting;
 
-  // ✅ PLACE THE EFFECT HERE (After activeMeeting is defined)
-  useEffect(() => {
-    if (!activeMeeting) return;
-
-    const checkAutoVacate = () => {
-      const now = new Date(currentTime);
-      const meetingStartDateTime = new Date(`${activeMeeting.booking_date}T${activeMeeting.start_time}:00`);
-      
-      const hasMeetingStarted = now >= meetingStartDateTime;
-      const gracePeriodEnd = new Date(meetingStartDateTime.getTime() + 5 * 60000);
-      const isPastGracePeriod = now >= gracePeriodEnd;
-
-      if (hasMeetingStarted && isPastGracePeriod && !isPersonDetected) {
-        console.log("No-show detected after meeting start! Auto-vacating room...");
-        handleEndMeetingEarly();
-      }
-    };
-
-    checkAutoVacate();
-  }, [currentTime, activeMeeting, isPersonDetected, handleEndMeetingEarly]);
-
   const currentTargetMeeting = activeMeeting || nextMeeting;
   
   const isWithinCheckInWindow = useMemo(() => {
@@ -614,6 +593,27 @@ function AppContent({ isMsalInitialized }) {
       console.error("Failed executing end meeting early callback:", error);
     }
   };
+
+    // ✅ PLACE THE EFFECT HERE (After activeMeeting is defined)
+  useEffect(() => {
+    if (!activeMeeting) return;
+
+    const checkAutoVacate = () => {
+      const now = new Date(currentTime);
+      const meetingStartDateTime = new Date(`${activeMeeting.booking_date}T${activeMeeting.start_time}:00`);
+      
+      const hasMeetingStarted = now >= meetingStartDateTime;
+      const gracePeriodEnd = new Date(meetingStartDateTime.getTime() + 5 * 60000);
+      const isPastGracePeriod = now >= gracePeriodEnd;
+
+      if (hasMeetingStarted && isPastGracePeriod && !isPersonDetected) {
+        console.log("No-show detected after meeting start! Auto-vacating room...");
+        handleEndMeetingEarly();
+      }
+    };
+
+    checkAutoVacate();
+  }, [currentTime, activeMeeting, isPersonDetected, handleEndMeetingEarly]);
 
   useEffect(() => {
     if (!currentTargetMeeting || isBreakActive) { 
