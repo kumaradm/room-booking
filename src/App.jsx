@@ -545,6 +545,55 @@ function AppContent({ isMsalInitialized }) {
     }
   };
 
+  const handleEndMeetingEarly = async () => {
+    if (!activeMeeting) return;
+
+    const token = await getOutlookToken();
+    if (!token) return;
+
+    try {
+      const pad = (num) => String(num).padStart(2, '0');
+      const d = new Date(currentTime);
+      const nowTimeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+      const targetEndDateTimeLocal = `${activeMeeting.booking_date}T${nowTimeStr}`;
+
+      // 1. Update Microsoft Graph (Patch Outlook Event End Time)
+      const response = await fetch(`https://graph.microsoft.com/v1.0/me/events/${activeMeeting.id}`, {
+        method: "PATCH",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          end: {
+            dateTime: targetEndDateTimeLocal,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          }
+        })
+      });
+
+      if (response.ok) {
+        // 2. Sync room status to Supabase if needed
+        if (room?.id) {
+          await supabase
+            .from('rooms')
+            .update({ is_occupied: false, updated_at: new Date() })
+            .eq('id', room.id);
+        }
+
+        // 3. Show confirmation feedback & refresh state
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 3000);
+        await fetchBookings();
+      } else {
+        const errorDetails = await response.json();
+        console.error("Failed to end meeting early in Outlook:", errorDetails);
+      }
+    } catch (error) {
+      console.error("Failed executing end meeting early callback:", error);
+    }
+  };
+
   useEffect(() => {
     if (!currentTargetMeeting || isBreakActive) { 
       emptyMinutesRef.current = 0;
@@ -870,7 +919,7 @@ function AppContent({ isMsalInitialized }) {
               </button>
             ) : currentStatus.text === "BREAK" || currentStatus.text === "IN USE" ? (
               <button 
-                onClick={() => handleCancelGhostMeeting(activeMeeting?.id)}
+                onClick={handleEndMeetingEarly}
                 className={scheduleButtonClass}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="size-7 text-white">

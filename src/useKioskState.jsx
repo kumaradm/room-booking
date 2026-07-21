@@ -88,6 +88,13 @@ export function useKioskState({
       return timeToMinutes(b.start_time) > nowMinutes;
     });
 
+    // FIX: Check-in window is 5 mins BEFORE to 5 mins AFTER start time (10 min total window)
+    const canCheckIn = bookings.some(b => {
+      if (b.booking_date !== timeStrings.dateStr) return false;
+      const start = timeToMinutes(b.start_time);
+      return nowMinutes >= (start - 5) && nowMinutes <= (start + 5);
+    });
+
     if (active) {
       const totalEndMinutes = timeToMinutes(active.end_time);
       const diffMins = Math.max(0, totalEndMinutes - nowMinutes);
@@ -96,15 +103,18 @@ export function useKioskState({
       const displayMins = (diffMins % 60).toString().padStart(2, '0');
 
       return {
-        // FIX: The notification bubble card should only show the next upcoming meeting
+        // FIX: Bubble notification displays NEXT meeting only (or null if none)
         meetingToDisplay: nextAhead || null, 
         activeMeeting: active, 
         nextMeeting: nextAhead || null,
+        canCheckIn,
         status: {
           text: isBreakActive ? "BREAK" : "IN USE",
           bgStyle: isBreakActive ? "from-[#007AFF] to-[#002D6C]" : "from-[#FF3B30] to-[#5E0B08]",
           textSize: "md:text-[8rem] xl:text-[9.5rem]",
-          subtext: "",
+          // FIX: Pass plain text title to display directly under "IN USE" text
+          activeTitle: active.is_private ? "Private Meeting" : active.title,
+          activeHost: active.users?.full_name || "Organizer",
           countdown: { 
             label: isBreakActive ? "Break ends when meeting ends in" : "Meeting will end in", 
             primary: displayHrs, 
@@ -133,11 +143,13 @@ export function useKioskState({
           meetingToDisplay: nextAhead,
           activeMeeting: null,
           nextMeeting: nextAhead,
+          canCheckIn,
           status: {
             text: "STARTING SOON",
             bgStyle: "from-[#FFD60A] to-[#3D2800]",
             textSize: "md:text-[6rem] xl:text-[7.5rem]",
-            subtext: "",
+            activeTitle: nextAhead.is_private ? "Private Meeting" : nextAhead.title,
+            activeHost: nextAhead.users?.full_name || "Organizer",
             countdown: { 
               label: "Next meeting will start in", 
               primary: displayMins, 
@@ -155,6 +167,7 @@ export function useKioskState({
       meetingToDisplay: nextAhead || null,
       activeMeeting: null,
       nextMeeting: null,
+      canCheckIn,
       status: {
         text: "AVAILABLE",
         subtext: nextAhead ? `Until ${formatTime(nextAhead.start_time)}` : "For the rest of the day",
@@ -167,41 +180,47 @@ export function useKioskState({
   const simulatedState = useMemo(() => {
     const baseConfig = SIMULATED_STATUS_CONFIGS[simulatedStatus];
     
-    const mockMeeting = {
+    const mockActive = simulatedStatus !== 'STARTING_SOON' ? {
       ...baseConfig.meeting,
       booking_date: timeStrings.dateStr,
-      start_time: new Date(currentTime.getTime() - (simulatedStatus === 'IN_USE' ? 15 : 0) * 60000).toTimeString().substring(0,5),
-      end_time: new Date(currentTime.getTime() + (simulatedStatus === 'STARTING_SOON' ? 4 : 20) * 60000).toTimeString().substring(0,5),
+      start_time: new Date(currentTime.getTime() - 15 * 60000).toTimeString().substring(0,5),
+      end_time: new Date(currentTime.getTime() + 20 * 60000).toTimeString().substring(0,5),
+    } : null;
+
+    const mockNext = {
+      id: "mock-next-1",
+      title: "Quarterly Strategy Review",
+      is_private: false,
+      users: { full_name: "Elena Rostova" },
+      start_time: "15:00",
+      end_time: "16:00"
     };
 
-    if (!baseConfig.countdown) {
-      return { status: baseConfig, activeMeeting: null, nextMeeting: null, meetingToDisplay: null };
-    }
-
     let displayPri = "00";
-    let displaySec = "00";
+    let displaySec = "18";
 
     if (simulatedStatus === 'STARTING_SOON') {
       const targetDate = new Date(currentTime.getTime() + 4 * 60000 + 12 * 1000); 
       const diffMs = Math.max(0, targetDate - currentTime);
       displayPri = Math.floor(diffMs / 60000).toString().padStart(2, '0');
       displaySec = Math.floor((diffMs % 60000) / 1000).toString().padStart(2, '0');
-    } else {
-      displaySec = "18"; 
     }
 
     return {
-      activeMeeting: simulatedStatus !== 'STARTING_SOON' ? mockMeeting : null,
-      // FIX: Adjusting simulation layer to keep mock upcoming configurations clear of active space
-      nextMeeting: simulatedStatus === 'STARTING_SOON' ? mockMeeting : null,
-      meetingToDisplay: simulatedStatus === 'STARTING_SOON' ? mockMeeting : null, 
+      activeMeeting: mockActive,
+      nextMeeting: mockNext,
+      // FIX: Ensure bubble notification card tracks UPCOMING meeting only
+      meetingToDisplay: mockNext, 
+      canCheckIn: true,
       status: {
         ...baseConfig,
-        countdown: {
+        activeTitle: mockActive ? mockActive.title : null,
+        activeHost: mockActive ? mockActive.users?.full_name : null,
+        countdown: baseConfig.countdown ? {
           ...baseConfig.countdown,
           primary: displayPri,
           secondary: displaySec
-        }
+        } : null
       }
     };
   }, [simulatedStatus, currentTime, timeStrings.dateStr]);
