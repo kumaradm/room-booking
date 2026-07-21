@@ -148,7 +148,7 @@ function AppContent({ isMsalInitialized }) {
       return null;
     }
   }, [instance]);
-
+  
   // --- MICROSOFT UPFRONT AUTHENTICATION LOGIC ---
   useEffect(() => {
     if (!isMsalInitialized) return;
@@ -437,6 +437,27 @@ function AppContent({ isMsalInitialized }) {
   const meetingToDisplay = USE_SIMULATOR ? statusConfigs[simulatedStatus].meeting : kioskState.meetingToDisplay;
   const nextMeeting = USE_SIMULATOR ? (simulatedStatus === 'STARTING_SOON' ? statusConfigs.STARTING_SOON.meeting : null) : kioskState.nextMeeting;
 
+  // ✅ PLACE THE EFFECT HERE (After activeMeeting is defined)
+  useEffect(() => {
+    if (!activeMeeting) return;
+
+    const checkAutoVacate = () => {
+      const now = new Date(currentTime);
+      const meetingStartDateTime = new Date(`${activeMeeting.booking_date}T${activeMeeting.start_time}:00`);
+      
+      const hasMeetingStarted = now >= meetingStartDateTime;
+      const gracePeriodEnd = new Date(meetingStartDateTime.getTime() + 5 * 60000);
+      const isPastGracePeriod = now >= gracePeriodEnd;
+
+      if (hasMeetingStarted && isPastGracePeriod && !isPersonDetected) {
+        console.log("No-show detected after meeting start! Auto-vacating room...");
+        handleEndMeetingEarly();
+      }
+    };
+
+    checkAutoVacate();
+  }, [currentTime, activeMeeting, isPersonDetected, handleEndMeetingEarly]);
+
   const currentTargetMeeting = activeMeeting || nextMeeting;
   
   const isWithinCheckInWindow = useMemo(() => {
@@ -603,7 +624,7 @@ function AppContent({ isMsalInitialized }) {
     const currentMinuteStr = timeStrings.timeStr.substring(0, 5); 
     const nowMins = timeToMinutes(timeStrings.timeStr);
     const startMins = timeToMinutes(currentTargetMeeting.start_time);
-    const checkInDeadline = startMins + 10;
+    const checkInDeadline = startMins + 5;
 
     if (!hasCheckedIn && nowMins > checkInDeadline) {
       console.warn(`Check-in deadline missed for meeting ${currentTargetMeeting.id}. Cancelling reservation.`);
@@ -639,7 +660,7 @@ function AppContent({ isMsalInitialized }) {
     if (showCheckInButton) {
       const nowMins = timeToMinutes(timeStrings.timeStr);
       const startMins = timeToMinutes(currentTargetMeeting.start_time);
-      const windowEndMins = startMins + 10;
+      const windowEndMins = startMins + 5;
       const minutesLeftToCheckIn = Math.max(0, windowEndMins - nowMins);
 
       if (minutesLeftToCheckIn === 0) {
